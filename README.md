@@ -1,8 +1,8 @@
 # `medos-trainer` — the image that actually touches the pixels
 
-This directory is a **second deployable**. `medicalos/medos` — the API, the worker, the
+This directory is a **second deployable**. `medos/medos` — the API, the worker, the
 gateway — carries no torch, no MONAI and no nnU-Net, and that separation is load-bearing
-rather than tidy: `medos/medos/training/chain.py` generates MONAI Bundle configs as *data* and
+rather than tidy: `medicalos_preprocessing/chain.py` generates MONAI Bundle configs as *data* and
 never imports MONAI; `MOS-TRAIN-225` forbids the nnU-Net planner and `nnUNetPlansManager`
 from the serving image's import closure *by name*; `MOS-REL-108` forbids in-process
 plugin loading. `tests/integration/test_trainer_boundary.py` holds all of it.
@@ -78,7 +78,7 @@ two permitted ones:
 
 | | nnU-Net v2 | Auto3DSeg |
 |---|---|---|
-| `MOS-TRAIN-223`'s mapping table | `medos/medos/training/autoconfig.py::DERIVED_QUANTITIES` already names v2 `plans.json` keys — `configurations.3d_fullres.spacing`, `transpose_forward`, `foreground_intensity_properties_per_channel.0.percentile_00_5` | its column points at `hyper_parameters.canonical_axis_order` and `hyper_parameters.crop_mode`, which `AutoRunner` does not emit under those names |
+| `MOS-TRAIN-223`'s mapping table | `medicalos_preprocessing/autoconfig.py::DERIVED_QUANTITIES` already names v2 `plans.json` keys — `configurations.3d_fullres.spacing`, `transpose_forward`, `foreground_intensity_properties_per_channel.0.percentile_00_5` | its column points at `hyper_parameters.canonical_axis_order` and `hyper_parameters.crop_mode`, which `AutoRunner` does not emit under those names |
 | fingerprint document | one file, `plans.json`, one digest | `datastats.yaml` **plus** a per-algorithm `hyper_parameters.yaml`; `fingerprint_digest` is one `sha256_digest` column |
 | natural output | one network at one fold | N algorithms and a combination rule — `MOS-TRAIN-227`'s ensemble machinery before the first registrable artifact |
 | spec specificity | `MOS-TRAIN-135`/`-136`/`-137` name it and its freeze explicitly | referenced, never pinned to a key |
@@ -228,13 +228,13 @@ about provenance: `MOS-EVID-021`'s de-identification status is recorded on the
    it must never reach `PreprocessingSpec.patch.batch_size` — is enforced in
    `packaging.derive_spec_document`.
 2. **The shipped exporter cannot read a real nnU-Net `plans.json`.**
-   `medos/medos/training/autoconfig.py` maps `foreground_crop` from
+   `medicalos_preprocessing/autoconfig.py` maps `foreground_crop` from
    `configurations.3d_fullres.use_mask_for_norm` and `_coerce` handles a `bool`; nnU-Net
    v2 writes a **list of bools, one per channel**, which falls through to the string
    branch and is refused as `crop_mode_not_mapped`. `backend.single_channel_view`
    flattens that one key for a single-channel dataset and **refuses** for more than one
    rather than taking the first channel's value. The fix belongs in
-   `medos/medos/training/autoconfig.py`, which this change does not own.
+   `medicalos_preprocessing/autoconfig.py`, which this change does not own.
 3. **`MOS-TRAIN-223`'s "that spec MUST be the registered one" is satisfied downstream,
    not by the run binding.** The run binds the *declared* spec's digest at submit; the
    derived spec exists only after the planner has run. The bundle carries the derived
@@ -248,8 +248,8 @@ about provenance: `MOS-EVID-021`'s de-identification status is recorded on the
 5. **`preprocessing.version` is the spec's major.** `routes_training` reads it as an
    `int` and the shipped spec documents version themselves `"1.0.0"`.
 6. **The exporter's axis alphabet is not the parser's, and no real plan can be
-   transcribed on the shipped code.** `medos/medos/training/autoconfig.py::_coerce` maps
-   nnU-Net's `transpose_forward` to `z`/`y`/`x`; `medos/medos/training/spec.py::parse_spec`
+   transcribed on the shipped code.** `medicalos_preprocessing/autoconfig.py::_coerce` maps
+   nnU-Net's `transpose_forward` to `z`/`y`/`x`; `medicalos_preprocessing/spec.py::parse_spec`
    refuses anything that is not a permutation of `k`/`j`/`i`. Found by running it: the
    first real plan produced `axis_order: ["x","z","y"]` and
    `ChainRefused: axis_order: must be a permutation of ['k','j','i']`.
