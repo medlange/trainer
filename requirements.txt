@@ -32,7 +32,7 @@ torch==2.5.1+cu124
 # `MOS-TRAIN-223`'s mapping table is written against this version's `plans.json` key
 # names -- `configurations.3d_fullres.spacing`, `transpose_forward`,
 # `foreground_intensity_properties_per_channel`. A major bump renames those keys, and
-# `medos.training.autoconfig.export_spec_fields` is written to REFUSE rather than drop a
+# `medicalos_preprocessing.autoconfig.export_spec_fields` is written to REFUSE rather than drop a
 # renamed field to a default, so a bump here fails the export loudly. That is why this is
 # `==` and not `~=`.
 nnunetv2==2.5.1
@@ -46,7 +46,7 @@ batchgenerators==0.25.1
 batchgeneratorsv2==0.2.1
 
 # numpy is the platform's pin, restated because it is load-bearing in BOTH images:
-# `medos.training.fixtures.PHANTOM_SHA256` and `GOLDEN_TENSOR_SHA256` are byte-exact
+# `medicalos_preprocessing.fixtures.PHANTOM_SHA256` and `GOLDEN_TENSOR_SHA256` are byte-exact
 # hashes recorded under numpy 1.26.4 on CPython 3.11, and `MOS-TRAIN-133`'s check
 # compares against them. nnU-Net 2.5.1 is a numpy<2 consumer, so the two agree here;
 # when they stop agreeing the golden fixture has to be re-recorded by a human who read
@@ -65,7 +65,7 @@ numpy==1.26.4
 # cryptography. The trainer serves nothing, authenticates nobody and signs nothing.
 psycopg[binary]==3.2.3
 
-# The image I/O nnU-Net reads NIfTI with, and the resampler `medos.training.spec`'s
+# The image I/O nnU-Net reads NIfTI with, and the resampler `medicalos_preprocessing.spec`'s
 # `backend.resampler` names. Pinned to the version the platform's spec fixtures declare.
 SimpleITK==2.3.1
 nibabel==5.2.1

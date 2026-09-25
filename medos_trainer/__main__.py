@@ -62,7 +62,7 @@ def _logging() -> None:
 
 
 def _refusals_of(exc: BaseException) -> list[dict[str, Any]]:
-    """`medos.training.errors.Refusal`s, as documents, when the failure was one.
+    """`medicalos_preprocessing.errors.Refusal`s, as documents, when the failure was one.
 
     The console renders the engine's refusal vocabulary already (`MOS-API-112` pins the
     wire form). A refusal raised inside the trainer is the same kind of fact as one raised
@@ -204,7 +204,7 @@ def _fit(
 
 
 def _canonical_digest(document: dict[str, Any]) -> str:
-    from medos.core.canonical import canonical_bytes, sha256_hex
+    from medicalos_preprocessing.canonical import canonical_bytes, sha256_hex
 
     return "sha256:" + sha256_hex(canonical_bytes(document))
 

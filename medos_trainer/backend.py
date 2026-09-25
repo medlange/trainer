@@ -206,7 +206,7 @@ def _dataset_json(
     """nnU-Net v2's `dataset.json`.
 
     `channel_names: {"0": "CT"}` is what makes the planner choose `CTNormalization`, which
-    is the ONLY normalisation scheme `medos.training.autoconfig._NORMALISATION_MAP` maps
+    is the ONLY normalisation scheme `medicalos_preprocessing.autoconfig._NORMALISATION_MAP` maps
     exactly (`MOS-TRAIN-223`: "fixes CTNormalization -> zscore_dataset and nothing else").
     A non-CT channel name here produces `ZScoreNormalization` and the export then REFUSES,
     which is the correct behaviour and a confusing one to debug -- hence this comment.
@@ -486,7 +486,7 @@ def derive_plan(
         preprocess_dataset,
     )
 
-    from medos.training.autoconfig import export_spec_fields, fingerprint_digest
+    from medicalos_preprocessing.autoconfig import export_spec_fields, fingerprint_digest
 
     # `prepare_workspace` already set the three roots and `__main__` called it before
     # this module was imported -- see its docstring for why the order is load-bearing.

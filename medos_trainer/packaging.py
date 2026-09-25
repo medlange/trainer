@@ -3,8 +3,8 @@
 
 WHAT THIS MODULE DOES NOT DO, AND WHY THAT IS THE POINT
 ---------------------------------------------------------
-It does not write a bundle. `medos.training.bundle.write_bundle` writes it and
-`medos.training.bundle.verify` reads it back, and this module calls both -- the same two
+It does not write a bundle. `medicalos_preprocessing.bundle.write_bundle` writes it and
+`medicalos_preprocessing.bundle.verify` reads it back, and this module calls both -- the same two
 functions the platform calls. `MOS-TRAIN-129` fixes the layout, `MOS-TRAIN-130` fixes the
 metadata contract and `MOS-TRAIN-131` requires `configs/inference.json` to be "generated
 from the registered `PreprocessingSpec` by a single generator ... byte-reproducible from
@@ -12,7 +12,7 @@ the spec alone". A trainer with its own packager would be a SECOND implementatio
 three, and the failure mode is the quiet one: a platform verifying a bundle against a
 layout the trainer stopped emitting, which passes until the day it does not.
 
-It does not transcribe the fingerprint either. `medos.training.autoconfig.
+It does not transcribe the fingerprint either. `medicalos_preprocessing.autoconfig.
 export_spec_fields` does that, under `MOS-TRAIN-223`'s fixed mapping table, and it
 "MUST refuse to emit for any derived quantity it cannot map exactly". What is here is the
 MERGE -- putting the exporter's dotted field paths into the bound spec document -- and the
@@ -30,7 +30,7 @@ a different tensor. Carrying the old hash forward would make `MOS-IMG-054`'s sta
 self-test fail on a correct model, and, worse, would make it PASS on an incorrect one if
 the constants happened to round back.
 
-`medos.training.preprocess.record_golden` is the ONE recorder (`MOS-TRAIN-134`,
+`medicalos_preprocessing.preprocess.record_golden` is the ONE recorder (`MOS-TRAIN-134`,
 `MOS-IMG-058`) and is what is called here. There is no second hashing function in this
 file and no comparison: `MOS-TRAIN-065` forbids an operation that RE-records an existing
 fixture, and this is the first recording for a spec that did not exist until the planner
@@ -81,7 +81,7 @@ __all__ = [
 #: `sliding_window_inference` have had these signatures since 1.3.
 MONAI_BUNDLE_TARGET: Final[str] = "1.4.0"
 
-#: `medos.training.bundle.write_bundle`'s three serialised forms. TorchScript is chosen
+#: `medicalos_preprocessing.bundle.write_bundle`'s three serialised forms. TorchScript is chosen
 #: here because `MOS-TRAIN-154`'s table admits it, because it is the form a torch trainer
 #: can emit without a second conversion tool, and because `MOS-TRAIN-159` to
 #: `MOS-TRAIN-169`'s conversion-equivalence checks are a `ConversionRun`'s job and not a
@@ -102,7 +102,7 @@ _WEIGHTS_FORMAT: Final[str] = "torchscript"
 #:
 #: The translation below is EXACT and is not a substitution: both alphabets name the
 #: same three axes in the same order -- `k`/`z` the slice axis, `j`/`y` the row,
-#: `i`/`x` the column, which is `medos.training.preprocess.ChainInput`'s documented
+#: `i`/`x` the column, which is `medicalos_preprocessing.preprocess.ChainInput`'s documented
 #: `(C, K, J, I)` and `CanonicalVolume`'s `[k, j, i]`. Anything not in this map is left
 #: alone so that a genuinely unmappable value still reaches the parser and is refused
 #: there, rather than being quietly renamed here.
@@ -138,9 +138,9 @@ def derive_spec_document(
     deployment's and is carried through unchanged, because the fingerprint has nothing to
     say about it and inventing a value would be the substitution `MOS-TRAIN-223` forbids.
     """
-    from medos.training.fixtures import phantom, phantom_input
-    from medos.training.preprocess import record_golden
-    from medos.training.spec import parse_spec
+    from medicalos_preprocessing.fixtures import phantom, phantom_input
+    from medicalos_preprocessing.preprocess import record_golden
+    from medicalos_preprocessing.spec import parse_spec
 
     document: dict[str, Any] = _deep_copy(bound)
     for path, value in dict(plan["spec_fields"]).items():
@@ -215,8 +215,8 @@ def _array_digest(array: Any) -> str:
 
 
 def _phantom_input(array: Any) -> Any:
-    from medos.training.fixtures import PHANTOM_AXCODES, PHANTOM_SPACING_MM
-    from medos.training.preprocess import ChainInput
+    from medicalos_preprocessing.fixtures import PHANTOM_AXCODES, PHANTOM_SPACING_MM
+    from medicalos_preprocessing.preprocess import ChainInput
 
     return ChainInput(
         arrays={"image": array}, spacing_mm=PHANTOM_SPACING_MM, axcodes=PHANTOM_AXCODES
@@ -233,7 +233,7 @@ def _phantom_shape_for(document: Mapping[str, Any]) -> tuple[int, int, int] | No
     Returns `None` when the shipped shape already suffices, so the common case uses the
     fixture `MOS-TRAIN-133` pins byte-for-byte.
     """
-    from medos.training.fixtures import PHANTOM_SHAPE, PHANTOM_SPACING_MM
+    from medicalos_preprocessing.fixtures import PHANTOM_SHAPE, PHANTOM_SPACING_MM
 
     patch = [int(n) for n in document["patch"]["size_voxels"]]
     target = [float(v) for v in document["target_spacing_mm"]]
@@ -262,9 +262,9 @@ def golden_fixture_bytes(spec_document: Mapping[str, Any]) -> tuple[bytes, bytes
     import nibabel as nib
     import numpy as np
 
-    from medos.training.fixtures import PHANTOM_SPACING_MM, phantom
-    from medos.training.preprocess import first_patch, model_space_tensor
-    from medos.training.spec import parse_spec
+    from medicalos_preprocessing.fixtures import PHANTOM_SPACING_MM, phantom
+    from medicalos_preprocessing.preprocess import first_patch, model_space_tensor
+    from medicalos_preprocessing.spec import parse_spec
 
     spec = parse_spec(dict(spec_document))
     shape = _phantom_shape_for(spec_document)
@@ -335,14 +335,14 @@ def write_candidate_bundle(
     classes: int,
     versions: Mapping[str, str],
 ) -> Any:
-    """Write `MOS-TRAIN-129`'s layout and return `medos.training.bundle`'s own report.
+    """Write `MOS-TRAIN-129`'s layout and return `medicalos_preprocessing.bundle`'s own report.
 
     The return value is a `BundleReport` from `verify()`, not a dict this module built:
     `bundle_digest` and `weights_digest` are what the PLATFORM will read back, and a
     trainer that reported its own numbers would be reporting a bundle it had not verified.
     """
-    from medos.training.bundle import metadata_document, write_bundle
-    from medos.training.spec import parse_spec
+    from medicalos_preprocessing.bundle import metadata_document, write_bundle
+    from medicalos_preprocessing.spec import parse_spec
 
     spec = parse_spec(dict(spec_document))
     label_set = list((dict(spec_document).get("io") or {}).get("label_set") or [])

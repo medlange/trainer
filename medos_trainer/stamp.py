@@ -101,7 +101,8 @@ _HASHED_TREES: Final[tuple[str, ...]] = (
 def _canonical(document: Mapping[str, Any]) -> bytes:
     """JCS-shaped bytes: sorted keys, no spaces, UTF-8. `MOS-EVID-008`'s form.
 
-    `medos.core.canonical.canonical_bytes` is the platform's implementation and is what
+    `medicalos_preprocessing.canonical.canonical_bytes` is the ONE implementation -- shared by the
+    platform and this image rather than owned by either (`MOS-REL-032`) -- and is what
     every other digest in this tree goes through. It is not imported here because this
     module runs during the build with stdlib only; the two agree on the two properties
     that matter for a digest -- key order and separator -- and
