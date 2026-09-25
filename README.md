@@ -31,21 +31,30 @@ inside a declared allow-list — lives in `../tests/`, because those are facts a
 things rather than about this one. The direction is one-way: the platform may read the
 trainer, the trainer may not read the platform.
 
-## Not yet separate, and this is the honest part
+## What this directory imports, and what is left
 
-**This directory is still two programs.** `plan`, `fit`, `declare-environment` and
-`doctor` are a trainer: they take `--run-dir`, read a directory, fit a model, write a
-bundle, and reach 9 platform modules totalling ~4 000 lines with no database and no
-network. `execute` and `execute --watch` are something else entirely — a supervisor that
-opens `MEDOS_DATABASE_URL`, polls `training_runs` for `PENDING` and writes run state back,
-reaching 26 modules and ~11 000 lines including `medos.db.tenancy` and `medos.db.audit`.
+**Eight of its nine modules import no `medos` at all.** `plan`, `fit`,
+`declare-environment` and `doctor` — the fitter — take `--run-dir`, read a directory, fit
+a model and write a bundle, reaching nothing outside themselves but
+`medicalos_preprocessing`, the package `MOS-IMG-003` requires and that both images
+install. That is what makes this tree installable by somebody with no MedicalOS.
 
-The two closures share exactly three modules. `tests/unit/test_trainer_import_boundary.py`
-in the platform's suite holds the line between them and its allow-list is written to
-SHRINK: an entry nobody imports any more is a failure there, not a formality.
+It reached **ten** platform modules when the separation started.
 
-Register entry 110 of `docs/spec/99-known-inconsistencies.md` records the measurement and
-what resolves it.
+The ninth module is `__main__.py`, and the remainder is its `execute` branch: the
+supervisor, which opens `MEDOS_DATABASE_URL`, polls `training_runs` for `PENDING` and
+writes run state back. Its body is not here any more — it is
+`medos/training/supervisor.py`, on the platform side where its database is. What stays is
+the subcommand that calls it, because `MOS-REL-039` allows one deployable per trust
+boundary and `LocalProcessOrchestrator` starts the fit as a CHILD PROCESS of this image
+rather than through an orchestrator API, which chapter 15 forbids from application code.
+So the supervisor runs here and lives there, and those were always two questions.
+
+`../tests/unit/test_trainer_import_boundary.py` holds the line. Its allow-list is written
+to SHRINK — an entry nobody imports any more is a failure there, not a formality — and it
+has gone 10 → 4 → 3 by failing on exactly that clause each time.
+
+Register entry 110 of `../docs/spec/99-known-inconsistencies.md` records the measurement.
 
 ---
 

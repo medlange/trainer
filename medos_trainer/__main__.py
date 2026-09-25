@@ -265,7 +265,7 @@ def _execute(args: argparse.Namespace) -> int:
 
     from medos.training.orchestrator import LocalProcessOrchestrator
     from medos_trainer.environment import declare, preprocessing_bindings
-    from medos_trainer.executor import execute_pending, execute_run
+    from medos.training.supervisor import execute_pending, execute_run
 
     dsn = os.environ.get("MEDOS_DATABASE_URL", "")
     if not dsn:
@@ -338,7 +338,7 @@ def _watch(
     """
     import time
 
-    from medos_trainer.executor import execute_pending
+    from medos.training.supervisor import execute_pending
 
     log = logging.getLogger("medos_trainer")
     log.info("supervisor watching for PENDING runs every %ss", args.watch)
