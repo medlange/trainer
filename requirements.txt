@@ -4,7 +4,7 @@
 # ------------------------------------------------------
 # It is the whole point of the separation. `MOS-TRAIN-225` forbids the nnU-Net planner
 # and `nnUNetPlansManager` from the SERVING image's import closure, and
-# `medos/training/chain.py` goes further for the platform generally: it EMITS
+# `medos/medos/training/chain.py` goes further for the platform generally: it EMITS
 # `{"_target_": "monai.transforms.Flip"}` as data and never imports MONAI, so the
 # platform carries no torch, no MONAI and no nnU-Net at all. Every pin below is a
 # dependency of the TRAINER and of nothing else, and `tests/integration/
@@ -50,7 +50,7 @@ batchgeneratorsv2==0.2.1
 # hashes recorded under numpy 1.26.4 on CPython 3.11, and `MOS-TRAIN-133`'s check
 # compares against them. nnU-Net 2.5.1 is a numpy<2 consumer, so the two agree here;
 # when they stop agreeing the golden fixture has to be re-recorded by a human who read
-# `medos/training/fixtures.py`, not silently resolved.
+# `medos/medos/training/fixtures.py`, not silently resolved.
 numpy==1.26.4
 
 # The ONE platform dependency this image restates, and the only one.

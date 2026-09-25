@@ -8,7 +8,7 @@
 # WHY THERE ARE TWO IMAGES AND NOT ONE
 # -------------------------------------
 # `medicalos/medos` -- the API, the worker, the gateway -- carries NO torch, NO MONAI and
-# NO nnU-Net, and that is the best property the training code has. `medos/training/
+# NO nnU-Net, and that is the best property the training code has. `medos/medos/training/
 # chain.py` generates MONAI Bundle configs as DATA (`{"_target_": "monai.transforms.
 # Flip"}`) and guards against a transform resolving to `monai.transforms` instead of the
 # MedicalOS one; `MOS-TRAIN-225` forbids the nnU-Net planner and `nnUNetPlansManager`
@@ -16,7 +16,7 @@
 # plugin loading. A single image would make all three unenforceable by construction.
 #
 # So the platform starts this image's entrypoint and talks to it over FILES AND EXIT
-# CODES -- `medos/training/orchestrator.py` documents the run directory and
+# CODES -- `medos/medos/training/orchestrator.py` documents the run directory and
 # `medos_trainer/contract.py` implements the other side of it. There is no socket, no
 # RPC and no shared process.
 #
@@ -24,7 +24,7 @@
 # ----------------------------------------------------------------------------
 # The obvious base is `nvidia/cuda:12.4.x-base-ubuntu22.04`. It is not used, and the
 # reason is pinning rather than size. Ubuntu 22.04 ships Python 3.10; CONTRACT.md §11
-# and `pyproject.toml` require 3.11, and `medos/training/fixtures.py` records two
+# and `pyproject.toml` require 3.11, and `medos/medos/training/fixtures.py` records two
 # byte-exact hashes under "numpy 1.26.4, CPython 3.11" that `MOS-TRAIN-133` compares
 # against -- so a 3.10 interpreter here would make the golden fixture a different
 # fixture. Getting 3.11 onto jammy means a third-party apt repository, which is a second
@@ -157,7 +157,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # belong: a `medicalos-preprocessing` package both images install, which this repository
 # has not built.
 COPY pyproject.toml /app/pyproject.toml
-COPY medos /app/medos
+COPY medos/medos /app/medos
 WORKDIR /app
 RUN pip install --no-cache-dir --no-deps -e .
 

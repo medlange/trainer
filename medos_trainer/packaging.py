@@ -44,7 +44,7 @@ enforced here -- `_merge` writes only the fields the exporter returned, and the 
 puts the training batch size in a different dict. The first half CANNOT be satisfied on
 this deployment and the reason is recorded in `trainer/README.md`: `0013_training.
 up.sql`'s `training_runs_guard()` seals `hyperparameters` at insert, and
-`medos/api/routes_training.py` inserts `{}`. The derived value is written into
+`medos/medos/api/routes_training.py` inserts `{}`. The derived value is written into
 `plan.json` and into the bundle's own record instead, and the gap is REPORTED rather than
 worked around by putting it somewhere `MOS-TRAIN-224` did not ask for.
 
@@ -71,7 +71,7 @@ __all__ = [
     "write_candidate_bundle",
 ]
 
-#: The MONAI version `medos/training/chain.py`'s generated `configs/inference.json`
+#: The MONAI version `medos/medos/training/chain.py`'s generated `configs/inference.json`
 #: targets. It is a statement about a FILE FORMAT and not about an installed package:
 #: MONAI is deliberately absent from this image (`framework_versions.monai` declares
 #: `absent`), because the platform "GENERATES MONAI Bundle configs as data and never
@@ -90,15 +90,15 @@ MONAI_BUNDLE_TARGET: Final[str] = "1.4.0"
 _WEIGHTS_FORMAT: Final[str] = "torchscript"
 
 
-#: `medos/training/autoconfig.py` spells the three volume axes `z`, `y`, `x`;
-#: `medos/training/spec.py` spells the same three `k`, `j`, `i` and REFUSES anything
+#: `medos/medos/training/autoconfig.py` spells the three volume axes `z`, `y`, `x`;
+#: `medos/medos/training/spec.py` spells the same three `k`, `j`, `i` and REFUSES anything
 #: else -- "axis_order: must be a permutation of ['k','j','i']".
 #:
 #: A DEFECT IN THE PLATFORM, FOUND BY RUNNING IT, REPORTED RATHER THAN ARGUED WITH. The
 #: exporter `MOS-TRAIN-223` makes authoritative emits a value the parser
 #: `MOS-IMG-049` makes authoritative cannot accept, so no real nnU-Net plan can be
 #: transcribed into a spec on the shipped code. The fix belongs in
-#: `medos/training/autoconfig.py::_coerce`, which this change does not own.
+#: `medos/medos/training/autoconfig.py::_coerce`, which this change does not own.
 #:
 #: The translation below is EXACT and is not a substitution: both alphabets name the
 #: same three axes in the same order -- `k`/`z` the slice axis, `j`/`y` the row,

@@ -3,7 +3,7 @@
 
 WHY THE TRAINER DECLARES THIS AND NOT THE COMPOSE FILE
 --------------------------------------------------------
-`medos/api/routes_training.py` states the honest gap in its own docstring: "A
+`medos/medos/api/routes_training.py` states the honest gap in its own docstring: "A
 deployment-level declaration is an assertion by the operator, not an observation by the
 runner. The observation point is `medos.training.runs.start()`, inside the process that
 actually holds the GPU, and this surface does not own it."
@@ -76,7 +76,7 @@ __all__ = [
     "preprocessing_bindings",
 ]
 
-#: `medos/api/routes_training.py::_ENVIRONMENT_KEYS`, restated. Both sides assert it and
+#: `medos/medos/api/routes_training.py::_ENVIRONMENT_KEYS`, restated. Both sides assert it and
 #: `tests/unit/test_trainer_environment.py` imports both: nine keys named twice with no
 #: test between them is how a deployment discovers a missing one at the first submit.
 ENVIRONMENT_KEYS: Final[tuple[str, ...]] = (
@@ -263,7 +263,7 @@ def _load_spec_document(reference: str) -> dict[str, Any]:
 def preprocessing_bindings(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
     """`{capability_id: {id, version, digest, output_kind}}`, with the digest COMPUTED.
 
-    `medos/api/routes_training.py::_SPEC_KEYS` requires all four per capability, and
+    `medos/medos/api/routes_training.py::_SPEC_KEYS` requires all four per capability, and
     `MOS-IMG-045` makes the `PreprocessingSpec` the registered artifact a run is fitted
     against. Which spec a deployment uses is a deployment decision and is declared in
     `preprocessing-bindings.json`; the DIGEST is not a decision and is not declared. It is
@@ -308,7 +308,7 @@ def declare(
 ) -> dict[str, Any]:
     """The nine-key document. Raises rather than emitting an incomplete one.
 
-    `medos/api/routes_training.py::load_training_environment` reads the result -- from
+    `medos/medos/api/routes_training.py::load_training_environment` reads the result -- from
     `MEDOS_TRAINING_ENVIRONMENT` directly, or from `@<path>` naming a file holding it. The
     compose stack uses the `@` form and a one-shot service that runs this function, so the
     platform image never has to know how any of it was derived.

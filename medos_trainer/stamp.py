@@ -3,7 +3,7 @@
 
 REGISTER ENTRY 82, WHICH THIS MODULE EXISTS TO CLOSE
 -----------------------------------------------------
-`MEDOS_TRAINING_ENVIRONMENT` needs nine keys and `medos/api/routes_training.py` answers
+`MEDOS_TRAINING_ENVIRONMENT` needs nine keys and `medos/medos/api/routes_training.py` answers
 `503 TRAINING_ENVIRONMENT_NOT_RECORDED` without them. Seven describe the deployment and a
 static declaration keeps them true. Two do not, and entry 82 says exactly why:
 

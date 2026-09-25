@@ -9,7 +9,7 @@ console -- `nnunet` or `auto3dseg` -- and forbids offering `monai_supervised`.
 two permitted ones, four things decide it and the last is the one that decides it:
 
   1. `MOS-TRAIN-223` FIXES A MAPPING TABLE PER BACKEND, AND ONE OF THE TWO ROWS IS
-     ALREADY IMPLEMENTED. `medos/training/autoconfig.py::DERIVED_QUANTITIES` names
+     ALREADY IMPLEMENTED. `medos/medos/training/autoconfig.py::DERIVED_QUANTITIES` names
      `configurations.3d_fullres.spacing`, `transpose_forward` and
      `foreground_intensity_properties_per_channel.0.percentile_00_5` -- nnU-Net v2
      `plans.json` keys, exactly as this version writes them. The `auto3dseg` column of the
@@ -331,7 +331,7 @@ def _write_supervision(
 
     THIS IS WHY THE MASKED PATH HAD NEVER RUN. `nnUNetTrainerMaskedChannels` reads this
     file from `$nnUNet_raw/<dataset>/` and refuses without it. The only writer of it was
-    `tools/ingest/nnunet_dataset.py`, a side tool that builds a dataset OUT OF BAND and
+    `medos/tools/ingest/nnunet_dataset.py`, a side tool that builds a dataset OUT OF BAND and
     drops the map beside THAT one -- a different directory from the one `stage_dataset`
     builds here, out of the cohort the platform sealed. The two never met, so a fit driven
     by this backend could not be masked, and the first one that tried died at construction
@@ -434,14 +434,14 @@ def single_channel_view(plans: Mapping[str, Any]) -> dict[str, Any]:
     """Flatten nnU-Net's per-channel lists for the one key the exporter reads as a scalar.
 
     A DEFECT IN THE PLATFORM'S EXPORTER, REPORTED HERE RATHER THAN WORKED AROUND SILENTLY.
-    `medos/training/autoconfig.py` maps `foreground_crop` from
+    `medos/medos/training/autoconfig.py` maps `foreground_crop` from
     `configurations.3d_fullres.use_mask_for_norm` and `_coerce` handles `bool` -- but
     nnU-Net v2 writes that field as a LIST OF BOOLS, one per input channel, and a list
     falls through to the string branch and is refused as `crop_mode_not_mapped`. So the
     shipped exporter cannot read a real nnU-Net `plans.json` at all. The mapping table in
     `MOS-TRAIN-223` says "crop-to-nonzero; `configurations.3d_fullres.use_mask_for_norm`"
     without saying it is per channel, so the requirement is arguably the thing that is
-    imprecise; either way the fix belongs in `medos/training/autoconfig.py`, which this
+    imprecise; either way the fix belongs in `medos/medos/training/autoconfig.py`, which this
     change does not own.
 
     What this function does instead is NARROW and REFUSES rather than picks: with exactly

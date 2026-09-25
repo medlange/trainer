@@ -2,7 +2,7 @@
 
 This directory is a **second deployable**. `medicalos/medos` — the API, the worker, the
 gateway — carries no torch, no MONAI and no nnU-Net, and that separation is load-bearing
-rather than tidy: `medos/training/chain.py` generates MONAI Bundle configs as *data* and
+rather than tidy: `medos/medos/training/chain.py` generates MONAI Bundle configs as *data* and
 never imports MONAI; `MOS-TRAIN-225` forbids the nnU-Net planner and `nnUNetPlansManager`
 from the serving image's import closure *by name*; `MOS-REL-108` forbids in-process
 plugin loading. `tests/integration/test_trainer_boundary.py` holds all of it.
@@ -44,7 +44,7 @@ It reached **ten** platform modules when the separation started.
 The ninth module is `__main__.py`, and the remainder is its `execute` branch: the
 supervisor, which opens `MEDOS_DATABASE_URL`, polls `training_runs` for `PENDING` and
 writes run state back. Its body is not here any more — it is
-`medos/training/supervisor.py`, on the platform side where its database is. What stays is
+`medos/medos/training/supervisor.py`, on the platform side where its database is. What stays is
 the subcommand that calls it, because `MOS-REL-039` allows one deployable per trust
 boundary and `LocalProcessOrchestrator` starts the fit as a CHILD PROCESS of this image
 rather than through an orchestrator API, which chapter 15 forbids from application code.
@@ -78,7 +78,7 @@ two permitted ones:
 
 | | nnU-Net v2 | Auto3DSeg |
 |---|---|---|
-| `MOS-TRAIN-223`'s mapping table | `medos/training/autoconfig.py::DERIVED_QUANTITIES` already names v2 `plans.json` keys — `configurations.3d_fullres.spacing`, `transpose_forward`, `foreground_intensity_properties_per_channel.0.percentile_00_5` | its column points at `hyper_parameters.canonical_axis_order` and `hyper_parameters.crop_mode`, which `AutoRunner` does not emit under those names |
+| `MOS-TRAIN-223`'s mapping table | `medos/medos/training/autoconfig.py::DERIVED_QUANTITIES` already names v2 `plans.json` keys — `configurations.3d_fullres.spacing`, `transpose_forward`, `foreground_intensity_properties_per_channel.0.percentile_00_5` | its column points at `hyper_parameters.canonical_axis_order` and `hyper_parameters.crop_mode`, which `AutoRunner` does not emit under those names |
 | fingerprint document | one file, `plans.json`, one digest | `datastats.yaml` **plus** a per-algorithm `hyper_parameters.yaml`; `fingerprint_digest` is one `sha256_digest` column |
 | natural output | one network at one fold | N algorithms and a combination rule — `MOS-TRAIN-227`'s ensemble machinery before the first registrable artifact |
 | spec specificity | `MOS-TRAIN-135`/`-136`/`-137` name it and its freeze explicitly | referenced, never pinned to a key |
@@ -92,7 +92,7 @@ fingerprint documents behind one `pip freeze`.
 
 ## 3. The entrypoint contract
 
-`medos/training/orchestrator.py::RUN_DIRECTORY` is the normative spelling;
+`medos/medos/training/orchestrator.py::RUN_DIRECTORY` is the normative spelling;
 `medicalos_preprocessing/contract.py` holds it for both sides, and
 `tests/unit/test_trainer_contract.py` asserts the two agree.
 
@@ -202,18 +202,18 @@ de-identified side of the Gateway, as the `dataset_export` consumer class.
 `MEDOS_TRAINER_STAGER=gateway` is the default and is that route.
 
 **On the shipped deployment it cannot produce a volume**, and the run fails saying so.
-`medos/gateway/app.py` answers `503 DEID_NOT_IMPLEMENTED` for that consumer class because
+`medos/medos/gateway/app.py` answers `503 DEID_NOT_IMPLEMENTED` for that consumer class because
 the de-identification stage does not exist and `MOS-DATA-037` requires the egress to fail
 closed; `deploy/compose/gateway-principals.json` declares no `dataset_export` principal
 either. That refusal is a working control, not a bug in this service. The alternative —
 presenting the worker's credential, which the Gateway resolves as `platform_writer` with
-no de-identification on egress — is the one `medos/training/retrieval.py` calls "the worst
+no de-identification on egress — is the one `medos/medos/training/retrieval.py` calls "the worst
 combination available: a seal that succeeds and is wrong".
 
 `MEDOS_TRAINER_STAGER=directory` with `MEDOS_TRAINER_IMAGE_ROOT` is for a site that
 exported its corpus out of band under its own de-identification. It asserts **nothing**
 about provenance: `MOS-EVID-021`'s de-identification status is recorded on the
-`DatasetVersion` at seal time by `medos/training/seal.py`, and nothing here can add to it.
+`DatasetVersion` at seal time by `medos/medos/training/seal.py`, and nothing here can add to it.
 
 ---
 
@@ -221,25 +221,25 @@ about provenance: `MOS-EVID-021`'s de-identification status is recorded on the
 
 1. **`MOS-TRAIN-224` cannot be satisfied on this deployment.** The requirement puts the
    derived *training* batch size in `TrainingRun.hyperparameters`.
-   `medos/api/routes_training.py` inserts `hyperparameters = {}` at submit and
+   `medos/medos/api/routes_training.py` inserts `hyperparameters = {}` at submit and
    `0013_training.up.sql::training_runs_guard()` seals that column against every later
    update. So there is no writable location for it. The trainer records it in
    `plan.json` and `result.json`; the half of the requirement that *is* enforceable —
    it must never reach `PreprocessingSpec.patch.batch_size` — is enforced in
    `packaging.derive_spec_document`.
 2. **The shipped exporter cannot read a real nnU-Net `plans.json`.**
-   `medos/training/autoconfig.py` maps `foreground_crop` from
+   `medos/medos/training/autoconfig.py` maps `foreground_crop` from
    `configurations.3d_fullres.use_mask_for_norm` and `_coerce` handles a `bool`; nnU-Net
    v2 writes a **list of bools, one per channel**, which falls through to the string
    branch and is refused as `crop_mode_not_mapped`. `backend.single_channel_view`
    flattens that one key for a single-channel dataset and **refuses** for more than one
    rather than taking the first channel's value. The fix belongs in
-   `medos/training/autoconfig.py`, which this change does not own.
+   `medos/medos/training/autoconfig.py`, which this change does not own.
 3. **`MOS-TRAIN-223`'s "that spec MUST be the registered one" is satisfied downstream,
    not by the run binding.** The run binds the *declared* spec's digest at submit; the
    derived spec exists only after the planner has run. The bundle carries the derived
    spec as `configs/preprocessing.json` and `result.json` carries its digest; pinning it
-   through `spec.preprocessing_spec_ref` is `medos/training/candidate.py`'s job at
+   through `spec.preprocessing_spec_ref` is `medos/medos/training/candidate.py`'s job at
    registration.
 4. **`framework_versions.monai` is `absent`.** `MOS-TRAIN-124` requires the key and this
    image does not install MONAI. `configs/metadata.json`'s `monai_version` is a different
@@ -248,8 +248,8 @@ about provenance: `MOS-EVID-021`'s de-identification status is recorded on the
 5. **`preprocessing.version` is the spec's major.** `routes_training` reads it as an
    `int` and the shipped spec documents version themselves `"1.0.0"`.
 6. **The exporter's axis alphabet is not the parser's, and no real plan can be
-   transcribed on the shipped code.** `medos/training/autoconfig.py::_coerce` maps
-   nnU-Net's `transpose_forward` to `z`/`y`/`x`; `medos/training/spec.py::parse_spec`
+   transcribed on the shipped code.** `medos/medos/training/autoconfig.py::_coerce` maps
+   nnU-Net's `transpose_forward` to `z`/`y`/`x`; `medos/medos/training/spec.py::parse_spec`
    refuses anything that is not a permutation of `k`/`j`/`i`. Found by running it: the
    first real plan produced `axis_order: ["x","z","y"]` and
    `ChainRefused: axis_order: must be a permutation of ['k','j','i']`.
@@ -264,7 +264,7 @@ about provenance: `MOS-EVID-021`'s de-identification status is recorded on the
 8. **`nnUNet_compile` is on and is not in the `determinism` block.** `MOS-TRAIN-124`'s
    four reproducibility blocks have no slot for it, and TorchInductor's kernel
    selection is a run-to-run variable exactly like `cudnn_benchmark`, which the block
-   *does* carry. Recorded here; the block is `medos/training/runs.py`'s.
+   *does* carry. Recorded here; the block is `medos/medos/training/runs.py`'s.
 
 ---
 

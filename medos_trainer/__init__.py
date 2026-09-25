@@ -3,7 +3,7 @@
 
 WHAT THIS PACKAGE IS
 ---------------------
-The other side of `medos/training/orchestrator.py`'s port. The platform writes a run
+The other side of `medos/medos/training/orchestrator.py`'s port. The platform writes a run
 directory, starts `/usr/local/bin/medos-trainer` as a child process with a scrubbed
 environment, and reads back files and an exit code. There is no socket, no RPC and no
 shared interpreter, which is what lets `medicalos/medos` carry no torch, no MONAI and no

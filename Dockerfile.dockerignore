@@ -8,7 +8,7 @@
 # could re-interrogate. An image that can run `git rev-parse` is an image that can report
 # a commit for a tree it was not built from.
 *
-!medos/
+!medos/medos/
 !pyproject.toml
 !trainer/
 

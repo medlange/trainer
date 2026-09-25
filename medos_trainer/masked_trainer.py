@@ -63,7 +63,7 @@ from medos_trainer.masked import (
     supervised_pair_count,
 )
 
-#: Where `tools/ingest/nnunet_dataset.py` writes the mask, beside dataset.json.
+#: Where `medos/tools/ingest/nnunet_dataset.py` writes the mask, beside dataset.json.
 SUPERVISION_FILE = "supervision.json"
 
 
@@ -158,7 +158,7 @@ class nnUNetTrainerMaskedChannels(nnUNetTrainer):
                     f"{SUPERVISION_FILE} at {expected}. {len(found)} other(s) exist:\n"
                     f"  {listed}\n"
                     f"Picking one would mean training under another dataset's channel "
-                    f"mask. Build this dataset with tools/ingest/nnunet_dataset.py, "
+                    f"mask. Build this dataset with medos/tools/ingest/nnunet_dataset.py, "
                     f"which writes the file beside dataset.json."
                 )
             else:
@@ -169,7 +169,7 @@ class nnUNetTrainerMaskedChannels(nnUNetTrainer):
                 f"supervising every channel on every case: that is precisely the "
                 f"false-negative signal it exists to remove, and a run that did it would "
                 f"look completely normal. Build the dataset with "
-                f"tools/ingest/nnunet_dataset.py, which writes the file."
+                f"medos/tools/ingest/nnunet_dataset.py, which writes the file."
             )
         document = json.loads(candidates[0].read_text(encoding="utf-8"))
         channels = list(document["channels"])

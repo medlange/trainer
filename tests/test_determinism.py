@@ -12,7 +12,7 @@ WHY THIS TEST EXISTS
 
 `medos_trainer.environment.DETERMINISM` and `SEEDS` are what the deployment DECLARES in
 `MEDOS_TRAINING_ENVIRONMENT`, and they travel into every run's binding through
-`medos/api/routes_training.py`. `medos_trainer.backend.apply_determinism` is what the
+`medos/medos/api/routes_training.py`. `medos_trainer.backend.apply_determinism` is what the
 trainer APPLIES at the start of each phase. If a key is added to the declaration and the
 applier never reads it, the binding records a setting nobody set -- which is precisely
 the assertion `MOS-TRAIN-126` is written against, and it is invisible: the run succeeds,
