@@ -204,7 +204,7 @@ de-identified side of the Gateway, as the `dataset_export` consumer class.
 **On the shipped deployment it cannot produce a volume**, and the run fails saying so.
 `medos/medos/gateway/app.py` answers `503 DEID_NOT_IMPLEMENTED` for that consumer class because
 the de-identification stage does not exist and `MOS-DATA-037` requires the egress to fail
-closed; `deploy/compose/gateway-principals.json` declares no `dataset_export` principal
+closed; `medos/deploy/compose/gateway-principals.json` declares no `dataset_export` principal
 either. That refusal is a working control, not a bug in this service. The alternative —
 presenting the worker's credential, which the Gateway resolves as `platform_writer` with
 no de-identification on egress — is the one `medos/medos/training/retrieval.py` calls "the worst
