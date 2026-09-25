@@ -158,6 +158,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # has not built.
 COPY pyproject.toml /app/pyproject.toml
 COPY medos/medos /app/medos
+# `medicalos_preprocessing/` IS A SEPARATE TOP-LEVEL PACKAGE AND BOTH IMAGES NEED IT.
+# `MOS-IMG-003` requires it published on its own, and 35 modules under `medos/medos/`
+# import it -- `api/routes_training.py`, `api/routes_curation.py`, `core/__init__.py`,
+# `db/audit.py` and nine `evidence/*` among them. Without this line `pip install -e .`
+# installs `medos` against a package that is not in the build context, and the image
+# fails at the first import rather than at build.
+COPY medicalos_preprocessing /app/medicalos_preprocessing
 WORKDIR /app
 RUN pip install --no-cache-dir --no-deps -e .
 
