@@ -43,7 +43,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from medos_trainer.contract import (
+from medicalos_preprocessing.contract import (
     ContractViolation,
     RunDirectory,
     failure_document,

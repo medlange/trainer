@@ -61,7 +61,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
 
-from medos_trainer.contract import ContractViolation
+from medicalos_preprocessing.contract import ContractViolation
 
 __all__ = [
     "MONAI_BUNDLE_TARGET",

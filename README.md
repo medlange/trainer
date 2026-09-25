@@ -84,7 +84,7 @@ fingerprint documents behind one `pip freeze`.
 ## 3. The entrypoint contract
 
 `medos/training/orchestrator.py::RUN_DIRECTORY` is the normative spelling;
-`medos_trainer/contract.py` implements the other side and
+`medicalos_preprocessing/contract.py` holds it for both sides, and
 `tests/unit/test_trainer_contract.py` asserts the two agree.
 
 ```

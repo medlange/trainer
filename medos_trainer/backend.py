@@ -76,7 +76,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
-from medos_trainer.contract import CohortEntry, ContractViolation, RunDirectory, RunRequest
+from medicalos_preprocessing.contract import CohortEntry, ContractViolation, RunDirectory, RunRequest
 
 __all__ = [
     "DATASET_ID",

@@ -65,7 +65,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from medos_trainer.contract import CONTRACT_VERSION, RUN_DIRECTORY, RunDirectory
+from medicalos_preprocessing.contract import CONTRACT_VERSION, RUN_DIRECTORY, RunDirectory
 
 __all__ = [
     "STAGERS",
