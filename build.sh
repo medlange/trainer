@@ -1,0 +1,85 @@
+#!/usr/bin/env sh
+# =====================================================================================
+# Build the medos-trainer image. THIS IS THE BUILD -- `docker build` by hand is refused.
+#
+# Register entry 82: `code_commit` and `image_digest` "change with every build, so a value
+# written into `docker-compose.yml` is correct exactly until the next
+# `docker compose build` and silently false afterwards". The fix is to stamp them at build
+# time, and this script is the half of that which has to run outside the image, because
+# the image deliberately cannot see the git tree (`Dockerfile.dockerignore` excludes
+# `.git`, and an image that can run `git rev-parse` is an image that can report a commit
+# for a tree it was not built from).
+#
+# What it does, and nothing else:
+#   1. reads the commit and the dirty flag out of git, through the ONE definition of
+#      "dirty" this project has (`medos_trainer.stamp.git_facts`);
+#   2. hands them to the build as arguments -- the Dockerfile refuses an empty one;
+#   3. prints the stamp the image computed about ITSELF, beside the OCI image id, so the
+#      two identifiers can be correlated by hand. See `medos_trainer/stamp.py` for why the
+#      recorded `image_digest` is the inventory digest and not the OCI id.
+#
+# USAGE
+#   trainer/build.sh                 # tag medicalos/trainer:0.3.0.dev0
+#   MEDOS_TRAINER_TAG=x trainer/build.sh
+#
+# Spec: MOS-TRAIN-124, MOS-TRAIN-125, MOS-TRAIN-126, MOS-REL-037, entry 82.
+# =====================================================================================
+set -eu
+
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../.." && pwd)
+tag=${MEDOS_TRAINER_TAG:-medicalos/trainer:0.3.0.dev0}
+
+# `git_facts` and not two inline `git` calls: the definition of a dirty tree is one
+# definition, in `stamp.py`, beside the field it is recorded into.
+facts=$(cd "$repo" && python -c '
+import json, sys
+sys.path.insert(0, "trainer")
+from medos_trainer.stamp import git_facts
+commit, dirty = git_facts(".")
+print(json.dumps({"commit": commit, "dirty": "true" if dirty else "false"}))
+')
+commit=$(printf '%s' "$facts" | python -c 'import json,sys; print(json.load(sys.stdin)["commit"])')
+dirty=$(printf '%s' "$facts" | python -c 'import json,sys; print(json.load(sys.stdin)["dirty"])')
+
+echo "medos-trainer: building $tag from commit $commit (dirty=$dirty)"
+
+iidfile=$(mktemp)
+trap 'rm -f "$iidfile"' EXIT
+
+# Under Git Bash / MSYS the shell hands `docker` a POSIX path (`/d/...`) that the Windows
+# daemon cannot resolve, and the build fails with "unable to prepare context". Measured on
+# this deployment, not anticipated. `cygpath` is absent everywhere else, so the branch
+# costs nothing on Linux.
+context=$repo
+dockerfile=$here/Dockerfile
+iidpath=$iidfile
+if command -v cygpath >/dev/null 2>&1; then
+  context=$(cygpath -w "$repo")
+  dockerfile=$(cygpath -w "$here/Dockerfile")
+  # `--iidfile` is opened by the DAEMON's client on the Windows side, so a POSIX path
+  # here fails the whole build after the image has already been exported -- measured,
+  # with "writing image ID file: The system cannot find the path specified".
+  iidpath=$(cygpath -w "$iidfile")
+fi
+
+DOCKER_BUILDKIT=1 docker build \
+  --file "$dockerfile" \
+  --tag "$tag" \
+  --iidfile "$iidpath" \
+  --build-arg "MEDOS_CODE_COMMIT=$commit" \
+  --build-arg "MEDOS_CODE_DIRTY=$dirty" \
+  "$context"
+
+echo
+echo "medos-trainer: built. The two identifiers, which answer different questions:"
+echo "  OCI image id (what the daemon stored, not reproducible across builds):"
+echo "    $(cat "$iidfile")"
+echo "  recorded image_digest (what the software IS, reproducible from commit + pins):"
+docker run --rm --entrypoint python "$tag" -c '
+import json
+from medos_trainer.stamp import read_stamp
+s = read_stamp()
+print("    " + s["image_digest"])
+print("  code_commit: " + s["code_commit"] + "   code_dirty: " + str(s["code_dirty"]))
+'

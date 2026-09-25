@@ -1,0 +1,84 @@
+# The medos-trainer image's dependency set, pinned exactly.
+#
+# WHY THIS FILE IS NOT `deploy/compose/requirements.txt`
+# ------------------------------------------------------
+# It is the whole point of the separation. `MOS-TRAIN-225` forbids the nnU-Net planner
+# and `nnUNetPlansManager` from the SERVING image's import closure, and
+# `medos/training/chain.py` goes further for the platform generally: it EMITS
+# `{"_target_": "monai.transforms.Flip"}` as data and never imports MONAI, so the
+# platform carries no torch, no MONAI and no nnU-Net at all. Every pin below is a
+# dependency of the TRAINER and of nothing else, and `tests/integration/
+# test_trainer_boundary.py` asserts that none of them reached `medicalos/medos`.
+#
+# The platform's own pins are NOT restated here. The trainer installs `medos` from the
+# repository with `--no-deps` on top of this file, so a drift between the two files is a
+# missing import at build time rather than two versions of numpy at run time.
+#
+# TORCH CARRIES THE CUDA USERSPACE, AND THAT IS DELIBERATE
+# ---------------------------------------------------------
+# `torch==2.5.1+cu124` declares `nvidia-cuda-runtime-cu12`, `nvidia-cudnn-cu12`,
+# `nvidia-cublas-cu12` and the rest as its own pinned wheels. So every CUDA library in
+# this image is pinned by the same resolver that pinned torch, and `pip freeze` is the
+# complete answer to "what touched the data". An `apt-get install cuda-*` on top of an
+# `nvidia/cuda` base would put a second, apt-pinned copy of the same libraries in the
+# image and leave the loader to choose -- which is a reproducibility hole in the one
+# record `MOS-TRAIN-126` exists to make trustworthy. The driver is not in the image and
+# must not be: it is injected by the container runtime from the host.
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+torch==2.5.1+cu124
+
+# nnU-Net v2. `MOS-TRAIN-135` permits `training_backend.kind = "nnunet"` and
+# `MOS-TRAIN-223`'s mapping table is written against this version's `plans.json` key
+# names -- `configurations.3d_fullres.spacing`, `transpose_forward`,
+# `foreground_intensity_properties_per_channel`. A major bump renames those keys, and
+# `medos.training.autoconfig.export_spec_fields` is written to REFUSE rather than drop a
+# renamed field to a default, so a bump here fails the export loudly. That is why this is
+# `==` and not `~=`.
+nnunetv2==2.5.1
+
+# nnU-Net's own stack, pinned rather than left to the resolver: `MOS-REL-037` forbids a
+# range on a recorded version, and `backend_versions` in MEDOS_TRAINING_ENVIRONMENT is a
+# recorded version.
+acvl-utils==0.2.3
+dynamic-network-architectures==0.3.1
+batchgenerators==0.25.1
+batchgeneratorsv2==0.2.1
+
+# numpy is the platform's pin, restated because it is load-bearing in BOTH images:
+# `medos.training.fixtures.PHANTOM_SHA256` and `GOLDEN_TENSOR_SHA256` are byte-exact
+# hashes recorded under numpy 1.26.4 on CPython 3.11, and `MOS-TRAIN-133`'s check
+# compares against them. nnU-Net 2.5.1 is a numpy<2 consumer, so the two agree here;
+# when they stop agreeing the golden fixture has to be re-recorded by a human who read
+# `medos/training/fixtures.py`, not silently resolved.
+numpy==1.26.4
+
+# The ONE platform dependency this image restates, and the only one.
+# `medos_trainer.executor` is the trainer deployable's supervisor: it reads the
+# `training_runs` rows a PERSON submitted and calls `medos.training.runs.start` /
+# `.succeed` / `.fail`, which `MOS-TRAIN-122` puts in the orchestrator's hands. That
+# needs the driver. Pinned to the platform image's exact version, because the two
+# processes write the same table and a psycopg that adapts jsonb differently on one side
+# is a row the other side reads back wrong.
+#
+# Nothing else of the platform's set is here: no fastapi, no uvicorn, no argon2, no
+# cryptography. The trainer serves nothing, authenticates nobody and signs nothing.
+psycopg[binary]==3.2.3
+
+# The image I/O nnU-Net reads NIfTI with, and the resampler `medos.training.spec`'s
+# `backend.resampler` names. Pinned to the version the platform's spec fixtures declare.
+SimpleITK==2.3.1
+nibabel==5.2.1
+
+# scipy/sklearn/tqdm: nnU-Net's transitive set. Pinned for the same reason as the rest.
+scipy==1.14.1
+scikit-learn==1.5.2
+scikit-image==0.24.0
+tqdm==4.67.1
+pandas==2.2.3
+einops==0.8.0
+graphviz==0.20.3
+yacs==0.1.8
+imagecodecs==2024.9.22
+connected-components-3d==3.19.0
+fft-conv-pytorch==1.2.0
