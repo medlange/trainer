@@ -33,7 +33,13 @@ trainer, the trainer may not read the platform.
 
 ## What this directory imports, and what is left
 
-**Eight of its nine modules import no `medos` at all.** `plan`, `fit`,
+**Exactly one module imports `medos`, and it is `__main__.py`.** That is the property,
+and `tests/unit/test_trainer_import_boundary.py` is where it is asserted --
+`test_no_fitter_file_imports_the_platform_at_all`, with `__main__.py` exempt because the
+cut runs through its `execute` branch. This sentence used to count the package's modules
+instead, and the count had drifted; register entry 137 records what it said and what was
+measured. A headcount goes stale every time somebody adds a file. The boundary does not.
+`plan`, `fit`,
 `declare-environment` and `doctor` — the fitter — take `--run-dir`, read a directory, fit
 a model and write a bundle, reaching nothing outside themselves but
 `medicalos_preprocessing`, the package `MOS-IMG-003` requires and that both images
