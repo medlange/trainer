@@ -32,17 +32,51 @@ tag=${MEDOS_TRAINER_TAG:-medicalos/trainer:0.3.0.dev0}
 
 # `git_facts` and not two inline `git` calls: the definition of a dirty tree is one
 # definition, in `stamp.py`, beside the field it is recorded into.
-facts=$(cd "$repo" && python -c '
+# THE FACTS COME FROM GIT -- FROM THE TREE THIS CONTEXT IS, OR THE ONE IT WAS COPIED FROM.
+#
+# The image is built where the GPU is, and that is not always the machine holding the
+# history: a card this developer's machine does not have (an sm_120 part, for which the
+# torch pin above is chosen) means the context is copied to that host and built there.
+# `.git` is NOT copied with it, and must not be -- `Dockerfile.dockerignore` gives the
+# reason: "an image that can run `git rev-parse` is an image that can report a commit for
+# a tree it was not built from."
+#
+# So a build outside the history is TOLD which tree it is building, and the caller
+# asserts the one thing no tool here can check: that this context is a faithful copy of
+# that tree. The assertion is explicit and both halves are required. A silent fallback --
+# to an empty commit, to "unknown", or worst of all to `dirty=false` -- would stamp a
+# reproducible-looking flag on an image nobody can reproduce, which is precisely the
+# failure `MOS-TRAIN-126` ("recorded rather than asserted") exists to prevent. Refusing is
+# the only honest default.
+if git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+  facts=$(cd "$repo" && python -c '
 import json, sys
 sys.path.insert(0, "trainer")
 from medos_trainer.stamp import git_facts
 commit, dirty = git_facts(".")
 print(json.dumps({"commit": commit, "dirty": "true" if dirty else "false"}))
 ')
-commit=$(printf '%s' "$facts" | python -c 'import json,sys; print(json.load(sys.stdin)["commit"])')
-dirty=$(printf '%s' "$facts" | python -c 'import json,sys; print(json.load(sys.stdin)["dirty"])')
+  commit=$(printf '%s' "$facts" | python -c 'import json,sys; print(json.load(sys.stdin)["commit"])')
+  dirty=$(printf '%s' "$facts" | python -c 'import json,sys; print(json.load(sys.stdin)["dirty"])')
+  origin=observed
+else
+  commit=${MEDOS_CODE_COMMIT:-}
+  dirty=${MEDOS_CODE_DIRTY:-}
+  if [ -z "$commit" ] || [ -z "$dirty" ]; then
+    echo "medos-trainer: $repo holds no git repository, and MEDOS_CODE_COMMIT /" >&2
+    echo "  MEDOS_CODE_DIRTY are not both set. A build outside the history has to be told" >&2
+    echo "  which tree it is building; set both from the machine that has that tree and" >&2
+    echo "  re-run. Nothing is guessed here on purpose -- see the comment above." >&2
+    exit 2
+  fi
+  case "$dirty" in
+    true|false) ;;
+    *) echo "medos-trainer: MEDOS_CODE_DIRTY is 'true' or 'false', got '$dirty'" >&2; exit 2 ;;
+  esac
+  origin=supplied
+fi
 
-echo "medos-trainer: building $tag from commit $commit (dirty=$dirty)"
+echo "medos-trainer: building $tag from commit $commit (dirty=$dirty, facts $origin)"
 
 iidfile=$(mktemp)
 trap 'rm -f "$iidfile"' EXIT

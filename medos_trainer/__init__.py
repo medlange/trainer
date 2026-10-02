@@ -21,7 +21,7 @@ THE MODULES, AND THE ONE RULE EACH CARRIES
                  partition and nothing else (`MOS-TRAIN-135`), `fit` trains against the
                  frozen plan and never re-derives (`MOS-TRAIN-225`).
     packaging    the derived plan -> `PreprocessingSpec` -> MONAI Bundle, through
-                 `medicalos_preprocessing.autoconfig` and `medicalos_preprocessing.bundle` rather than
+                 `medos.sdk.autoconfig` and `medos.sdk.bundle` rather than
                  through a second implementation of either.
     executor     the trainer deployable's own supervisor: it picks up a run a PERSON
                  submitted and drives it. It never submits one.

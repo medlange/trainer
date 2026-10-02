@@ -460,3 +460,262 @@ def test_every_weight_zero_is_refused_rather_than_returning_nothing() -> None:
     tensors = [torch.zeros(1, 1, 2, 2, 2) for _ in range(2)]
     with pytest.raises(ValueError, match="every deep supervision weight is zero"):
         wrapper(tensors, tensors, torch.ones(1, 1))
+
+
+# ======================================================================================
+# The focal exponent on the pointwise term
+#
+# WHY IT IS A PARAMETER AND NOT A SECOND LOSS CLASS. `focal_gamma=0.0` with
+# `focal_alpha=None` is plain BCE bit-identically, so the arm already measured is the
+# gamma=0 special case and a comparison against it is exact rather than approximate. The
+# first test here is what makes that claim checkable rather than asserted in a docstring.
+# ======================================================================================
+def _easy_batch(hard_fraction: float = 0.001):
+    """A batch shaped like a real patch: almost every voxel an easy, correct background.
+
+    That shape is the whole reason focal is here -- and it is also the shape that makes the
+    denominator defect invisible, because the easy voxels are what get down-weighted.
+    """
+    torch.manual_seed(20260926)
+    logits = torch.full((2, 3, 16, 16, 16), -6.0)      # confident, correct background
+    target = torch.zeros_like(logits)
+    hard = int(logits.numel() * hard_fraction)
+    flat_t, flat_l = target.view(-1), logits.view(-1)
+    flat_t[:hard] = 1.0                                 # present, and confidently missed
+    flat_l[:hard] = -6.0
+    mask = torch.ones(2, 3)
+    return logits.requires_grad_(True), target, mask
+
+
+def test_gamma_zero_is_plain_bce_bit_identically() -> None:
+    """AGAINST TORCH'S OWN BCE, NOT AGAINST ANOTHER INSTANCE OF THIS CLASS.
+
+    The first version compared `focal_gamma=0.0` with the default construction and asserted
+    they agreed. They always agree -- both are this class, so any change to a DEFAULT moves
+    both sides together, and the test could not see it. Proved by breaking: making
+    `focal_alpha` default to `0.5` left it green.
+
+    So the identity is checked against `F.binary_cross_entropy_with_logits` with its own
+    `reduction='mean'`, which is the thing the claim actually names. Bit-identical and not
+    `approx`, because the whole argument for making this a parameter is that the arm already
+    measured IS this case, and an identity claimed to a tolerance is not one.
+    """
+    logits, target, mask = _easy_batch()
+    assert float(mask.min()) == 1.0, "the identity holds against plain BCE only unmasked"
+    expected = torch.nn.functional.binary_cross_entropy_with_logits(logits, target)
+
+    for kwargs in ({}, {"focal_gamma": 0.0}, {"focal_gamma": 0.0, "focal_alpha": None}):
+        term = masked.MaskedDiceBCELoss(weight_dice=0.0, weight_bce=1.0, **kwargs)
+        assert term(logits, target, mask).item() == expected.item(), (
+            f"{kwargs} is not plain BCE"
+        )
+
+
+def test_the_focal_weighted_mean_would_amplify_the_term() -> None:
+    """THE DEFECT THIS TEST EXISTS FOR, AND IT WAS WRITTEN INTO THIS FILE FIRST.
+
+    The first implementation normalised by `sum(w)` instead of by the voxel count, on the
+    argument that a weighted mean "keeps the term's scale" while gamma only moved the
+    gradient around. It does the opposite: every surviving gradient is multiplied by
+    `N / sum(w)`, which is measured below and is about three orders of magnitude on a batch
+    shaped like a real patch. A thousandfold effective learning-rate rise on one of two
+    summed terms, arriving as a side effect of a knob that claimed to change only WHERE.
+
+    The claim was stated as this test, and the test refused it. It is kept pointing at the
+    form that was rejected, because an argument for a denominator that cannot fail against
+    the alternative is not an argument.
+    """
+    logits, target, mask = _easy_batch()
+    term = masked.MaskedDiceBCELoss(weight_dice=0.0, weight_bce=1.0, focal_gamma=2.0)
+    value = term(logits, target, mask)
+
+    voxels = float(torch.ones_like(logits).sum())
+    amplification = voxels / term.effective_voxels
+    assert amplification > 100.0, (
+        "the fixture does not reproduce the amplification, so it cannot rule it out: "
+        f"N/sum(w) = {amplification!r}"
+    )
+
+    # What the rejected form would have returned, from the same forward: our value times
+    # that factor. Shown rather than described.
+    weighted_mean = float(value) * amplification
+    assert weighted_mean > float(value) * 100.0
+
+
+def test_a_hard_voxel_keeps_the_gradient_gamma_zero_gave_it() -> None:
+    """The positive half of the same argument, and the reason the denominator is the count.
+
+    Focal is meant to leave the voxels that matter alone and remove the ones drowning them.
+    A hard voxel's weight is ~1, so its gradient must be essentially unchanged from plain
+    BCE, while an easy voxel's must fall by orders of magnitude.
+    """
+    hard_fraction = 0.001
+    magnitudes = {}
+    for gamma in (0.0, 2.0):
+        logits, target, mask = _easy_batch(hard_fraction)
+        term = masked.MaskedDiceBCELoss(weight_dice=0.0, weight_bce=1.0, focal_gamma=gamma)
+        term(logits, target, mask).backward()
+        grad = logits.grad.abs().view(-1)
+        hard = int(grad.numel() * hard_fraction)
+        magnitudes[gamma] = (float(grad[:hard].mean()), float(grad[hard:].mean()))
+
+    hard_0, easy_0 = magnitudes[0.0]
+    hard_2, easy_2 = magnitudes[2.0]
+    assert hard_2 == pytest.approx(hard_0, rel=0.02), (
+        f"a hard voxel's gradient moved from {hard_0!r} to {hard_2!r}; gamma is not supposed "
+        "to touch the voxels the model is getting wrong"
+    )
+    assert easy_2 < easy_0 / 1000.0, (
+        f"an easy voxel's gradient went from {easy_0!r} to {easy_2!r}; the exponent is not "
+        "suppressing anything"
+    )
+
+
+def test_the_effective_voxel_count_is_recorded_and_falls_with_gamma() -> None:
+    """The knob reports its own effect. A weighted mean over a shrinking set has rising
+    variance, and this is the number that says whether gamma has been pushed too far --
+    a diagnostic the parameter owes, not one a reader should have to derive."""
+    logits, target, mask = _easy_batch()
+    counts = []
+    for gamma in (0.0, 1.0, 2.0, 4.0):
+        term = masked.MaskedDiceBCELoss(weight_dice=0.0, weight_bce=1.0, focal_gamma=gamma)
+        term(logits, target, mask)
+        counts.append(term.effective_voxels)
+    assert counts[0] == float(torch.ones_like(logits).sum()), (
+        "at gamma=0 every weight is 1.0, so the effective count IS the supervised voxel count"
+    )
+    assert counts == sorted(counts, reverse=True), f"not monotone in gamma: {counts}"
+
+
+def test_focal_moves_gradient_from_the_easy_voxels_to_the_hard_ones() -> None:
+    """The point of the exponent, as a measurement.
+
+    The easy voxels are confident and correct; the hard ones are confidently wrong. Focal
+    must raise the hard voxels' SHARE of the gradient. Shares, not magnitudes, because the
+    term's total scale is deliberately held constant by the denominator above.
+    """
+    hard_fraction = 0.001
+    shares = []
+    for gamma in (0.0, 2.0):
+        logits, target, mask = _easy_batch(hard_fraction)
+        term = masked.MaskedDiceBCELoss(weight_dice=0.0, weight_bce=1.0, focal_gamma=gamma)
+        term(logits, target, mask).backward()
+        grad = logits.grad.abs().view(-1)
+        hard = int(grad.numel() * hard_fraction)
+        shares.append(float(grad[:hard].sum() / grad.sum()))
+    # NOT `shares[0] * 5`: the baseline share here is 0.28, so five times it exceeds 1.0
+    # and no share could ever satisfy it. An assertion nothing can satisfy is not a stricter
+    # test, it is a broken one.
+    assert shares[1] - shares[0] > 0.5, (
+        f"gamma=2 gave the hard voxels {shares[1]:.4f} of the gradient against "
+        f"{shares[0]:.4f} at gamma=0; the exponent is not concentrating anything"
+    )
+
+
+def test_the_focal_weight_is_not_a_path_for_the_gradient() -> None:
+    """`(1 - p_t)^gamma` is detached, CHECKED AGAINST THE GRADIENT ARITHMETIC.
+
+    Attached, raising `1 - p_t` raises the weight, so the loss contains a term that rewards
+    being wrong and the optimiser will find it. The forward value is IDENTICAL either way --
+    only the backward differs -- so nothing about the loss number can reveal this.
+
+    The first version compared gradient SIGNS with plain BCE's and was blind: on a batch of
+    confident background the extra term does not flip a sign, it rescales. Proved by
+    breaking. So the gradient is compared with what it must be: for BCE-with-logits,
+    `d(ce)/d(logit)` is `sigmoid(logit) - target`, and the term is `sum(w * ce) / N`, so
+    every gradient is exactly `w * (p - t) / N` with `w` a constant.
+    """
+    logits, target, mask = _easy_batch()
+    term = masked.MaskedDiceBCELoss(weight_dice=0.0, weight_bce=1.0, focal_gamma=2.0)
+    term(logits, target, mask).backward()
+
+    with torch.no_grad():
+        probability = torch.sigmoid(logits)
+        p_t = probability * target + (1.0 - probability) * (1.0 - target)
+        weight = (1.0 - p_t) ** 2.0
+        expected = weight * (probability - target) / float(logits.numel())
+
+    assert torch.allclose(logits.grad, expected, rtol=1e-6, atol=1e-12), (
+        "the gradient is not `w * (p - t) / N` with a constant w, so the focal weight is "
+        "carrying gradient of its own: max deviation "
+        f"{float((logits.grad - expected).abs().max())!r}"
+    )
+
+
+@pytest.mark.parametrize("gamma,alpha,message", [
+    (-1.0, None, "negative exponent up-weights"),
+    (2.0, 0.0, "must lie in"),
+    (2.0, 1.0, "must lie in"),
+])
+def test_an_unusable_focal_setting_is_refused_at_construction(gamma, alpha, message) -> None:
+    """Refused where it is free. A gamma of -1 or an alpha of 0 produces a loss that trains
+    and trains the wrong thing; the cost of finding that out later is a run."""
+    with pytest.raises(ValueError, match=message):
+        masked.MaskedDiceBCELoss(focal_gamma=gamma, focal_alpha=alpha)
+
+
+# --------------------------------------------------------------------------------------
+# Channel weights
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("batch_dice", [False, True])
+def test_all_ones_channel_weights_are_bit_identical_to_unweighted(batch_dice: bool) -> None:
+    """THE IDENTITY GUARANTEE. Every run trained before class_weights.json existed ran
+    unweighted; a weights tuple of ones must reproduce that arithmetic exactly, or the
+    comparison against those runs is against a different loss. Same rule as focal's
+    `gamma = 0.0` default."""
+    net, image, target = _fixture()
+    mask = torch.tensor([[1.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=torch.float64)
+
+    plain = masked.MaskedDiceBCELoss(batch_dice=batch_dice)
+    weighted = masked.MaskedDiceBCELoss(
+        batch_dice=batch_dice, channel_weights=(1.0, 1.0, 1.0))
+
+    plain_loss, plain_grads = _loss_and_grads(net, image, target, mask, plain)
+    other_loss, other_grads = _loss_and_grads(net, image, target, mask, weighted)
+
+    assert torch.equal(plain_loss, other_loss), (
+        f"all-ones weights moved the loss from {plain_loss.item()!r} to "
+        f"{other_loss.item()!r}: the weights knob is not an exact identity at ones"
+    )
+    for name in plain_grads:
+        assert torch.equal(plain_grads[name], other_grads[name]), (
+            f"gradient of {name!r} changed under all-ones channel weights"
+        )
+
+
+def test_upweighting_a_channel_scales_its_pointwise_gradient() -> None:
+    """The pointwise term's denominator is the unweighted voxel count (documented there:
+    a weighted denominator hides an effective learning-rate change in a weighting knob).
+    A pair weighted `w` therefore contributes exactly `w` times the gradient it had at
+    `w = 1` -- asserted on a batch that supervises ONE pair, so the whole loss is that
+    pair, and with `weight_dice = 0.0` the isolation is exact, not argued."""
+    net, image, target = _fixture(batch=1)
+    mask = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float64)
+
+    unit = masked.MaskedDiceBCELoss(weight_dice=0.0,
+                                    channel_weights=(1.0, 1.0, 1.0))
+    quadruple = masked.MaskedDiceBCELoss(weight_dice=0.0,
+                                         channel_weights=(4.0, 1.0, 1.0))
+
+    _, unit_grads = _loss_and_grads(net, image, target, mask, unit)
+    _, quad_grads = _loss_and_grads(net, image, target, mask, quadruple)
+
+    for name, g1 in unit_grads.items():
+        # Compare `4 * unit` to `quadruple` directly: where a head is untouched (its
+        # channels are unsupervised) both gradients are zero and 4 * 0 == 0 holds.
+        assert torch.allclose(4.0 * g1, quad_grads[name], atol=1e-9), (
+            f"{name}: weight 4.0 did not quadruple the pointwise gradient "
+            f"(max |4*unit - quad| = {(4.0 * g1 - quad_grads[name]).abs().max().item():.3e})"
+        )
+
+
+def test_channel_weights_that_do_not_match_the_heads_are_refused() -> None:
+    """The weights come from the dataset's class_weights.json; a count mismatch means the
+    file does not describe this label set, and a padded default would train unweighted
+    channels under a record that says otherwise."""
+    net, image, target = _fixture(channels=3)
+    loss_fn = masked.MaskedDiceBCELoss(channel_weights=(1.0, 2.0))
+    with pytest.raises(ValueError, match="channel_weights has 2 entries"):
+        loss_fn(net(image), target, torch.ones(2, 3, dtype=torch.float64))

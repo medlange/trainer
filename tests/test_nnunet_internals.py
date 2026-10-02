@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""What nnU-Net 2.5.1 actually does, asserted rather than read from documentation.
+"""What the PINNED nnU-Net actually does, asserted rather than read from documentation.
+
+THE VERSION IS NOT NAMED IN THIS DOCSTRING ANY MORE, AND THAT IS THE POINT OF THE FIRST
+TEST BELOW. It said "nnU-Net 2.5.1" while the shipped image had moved to 2.6.4 -- so every
+claim in this file was being established against whichever version happened to be installed
+where the suite ran, under a heading naming a different one. Locally that was 2.5.1 against
+an image running 2.6.4: green, and meaningless. `test_the_installed_versions_are_the_pins`
+is what makes "the pinned nnU-Net" a fact rather than a hope.
 
 WHY THIS GATE EXISTS
 --------------------
@@ -44,6 +51,7 @@ Spec: MOS-REL-032 (declared deviations), MOS-TRAIN-141, MOS-TRAIN-225.
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 
 import pytest
 
@@ -57,12 +65,81 @@ import pytest
 # A path selects this suite just as well: `pytest trainer/tests`. What the marker was for --
 # keeping it out of the default unit run -- the directory already achieves, because
 # `pytest tests/unit` does not reach here.
-
 # Deliberately a hard import. See the module docstring: this gate reports a missing pin as
 # a failure, because the pin is the thing it exists to check.
 import torch  # noqa: E402
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer  # noqa: E402
 from nnunetv2.utilities.label_handling.label_handling import LabelManager  # noqa: E402
+
+#: The packages whose PRIVATE API the claims in this file, in `masked_trainer.py` and in the
+#: architecture catalogue rest on. Not every pin in `requirements.txt`: a mismatch in
+#: `blosc2` is a data-format problem the image will report itself, while a mismatch in these
+#: three silently changes what a passing gate means.
+PINNED_FOR_INTERNALS = ("nnunetv2", "dynamic-network-architectures", "torch", "monai")
+
+
+def _pins() -> dict[str, str]:
+    """The `name==version` pins from the image's own requirements file.
+
+    Read from the file rather than restated here, because a version written in two places is
+    not a pin -- it is two numbers that agree until someone edits one.
+    """
+    text = (Path(__file__).resolve().parents[1] / "requirements.txt").read_text(
+        encoding="utf-8"
+    )
+    found = {}
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if "==" in line and not line.startswith("-"):
+            name, _, version = line.partition("==")
+            found[name.strip().lower()] = version.strip()
+    return found
+
+
+def test_the_installed_versions_are_the_pins() -> None:
+    """THE INSTRUMENT, CHECKED BEFORE ANY MEASUREMENT IS TAKEN WITH IT.
+
+    Every other test in this file asserts something about a third-party private API, and is
+    therefore a statement about ONE version. Nothing tied the installed version to the
+    image's, and the two diverged: the local environment sat on nnunetv2 2.5.1 and
+    dynamic-network-architectures 0.3.1 while `requirements.txt` had moved to 2.6.4 and
+    0.4.4 for the image that actually trained the models. The suite was green on both
+    machines and agreed about nothing.
+
+    That is the same defect as a lint gate with no fixed instrument, whose verdict depends on
+    the calendar. It is checked here, first, and it FAILS rather than skips: an unpinned
+    instrument does not make the other gates uncertain, it makes them unrelated to the image.
+
+    THE LOCAL BUILD TAG IS NOT PART OF THE VERSION. `torch==2.7.1+cu128` pins the CUDA
+    userspace the image carries; a CPU machine running `2.7.1+cpu` has the same public API
+    and the same internals, and requiring the tag would make this gate unrunnable anywhere
+    a card is absent -- which is exactly where the cheap gates are supposed to run. The full
+    string is still recorded, in `MEDOS_TRAINING_ENVIRONMENT`, where it is provenance rather
+    than a precondition.
+    """
+    import importlib.metadata as metadata
+
+    pins = _pins()
+    wrong = []
+    for name in PINNED_FOR_INTERNALS:
+        want = pins.get(name)
+        assert want, f"{name} carries no `==` pin in trainer/requirements.txt"
+        try:
+            installed = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            wrong.append(f"{name}: pinned {want}, NOT INSTALLED")
+            continue
+        if installed.split("+")[0] != want.split("+")[0]:
+            wrong.append(f"{name}: pinned {want}, installed {installed}")
+    assert not wrong, (
+        "the installed trainer stack is not the image's: "
+        + "; ".join(wrong)
+        + ". Every other gate in this file asserts something about one version's private "
+        "API. Against a different version they are green and unrelated to the image that "
+        "trains the models. Install the pins with "
+        "`pip install -r trainer/requirements.txt`"
+    )
+
 
 #: One channel per finding, which is what a multi-label label_set looks like: each value is
 #: a list of exactly one label id.
@@ -177,15 +254,69 @@ def test_the_batch_carries_case_identifiers_under_keys() -> None:
     There was no second candidate. If this were absent the design would have needed the
     mask baked into the staged label files, which cannot represent 'unknown' distinctly
     from 'absent'.
-    """
-    import nnunetv2.training.dataloading.data_loader_3d as loader_3d
 
-    source = inspect.getsource(loader_3d)
-    assert "'keys'" in source or '"keys"' in source, (
-        "the 3D dataloader no longer emits 'keys'. Without a case identifier in the batch "
-        "there is nothing to join the per-case channel mask onto, and the masked fit has "
-        "no delivery mechanism at all."
+    FOUND BY SEARCH AND ASSERTED BY SYNTAX, FOR TWO REASONS THIS GATE LEARNED THE HARD WAY.
+
+    It imported `nnunetv2.training.dataloading.data_loader_3d` by name and searched its
+    source text for the string `'keys'`. Both halves failed:
+
+      * 2.6.4 collapsed `data_loader_2d` and `data_loader_3d` into one `data_loader`, so the
+        import raised `ModuleNotFoundError` and the gate was DEAD -- not red for its own
+        reason, but uncollectable -- through the entire migration that put 2.6.4 into the
+        image. The claim the whole masked design rests on went unverified while two 200-epoch
+        fits ran on it. They ran correctly, which is the point: nothing was checking.
+      * a source-text search cannot tell code from prose about code. This very docstring
+        contains `'keys'`, so the old assertion would pass against a module whose only
+        mention of it was a comment saying it had been removed.
+
+    So the class is located by searching the `dataloading` package -- a rename is reported
+    with what was found instead of raising on an import line -- and the claim is asserted
+    over the RETURN STATEMENT's syntax tree.
+    """
+    import ast
+    import importlib
+    import pkgutil
+    import textwrap
+
+    import nnunetv2.training.dataloading as dataloading
+
+    loaders = {}
+    for module_info in pkgutil.iter_modules(dataloading.__path__):
+        module = importlib.import_module(f"{dataloading.__name__}.{module_info.name}")
+        for name, obj in vars(module).items():
+            if (inspect.isclass(obj) and obj.__module__ == module.__name__
+                    and name.startswith("nnUNetDataLoader")):
+                loaders[f"{module_info.name}.{name}"] = obj
+    assert loaders, (
+        "no class named nnUNetDataLoader* under nnunetv2.training.dataloading; it holds "
+        f"{[m.name for m in pkgutil.iter_modules(dataloading.__path__)]}. The dataloader is "
+        "what puts a case identifier in the batch, and without one there is nothing to join "
+        "the per-case channel mask onto"
     )
+
+    for where, loader in sorted(loaders.items()):
+        generate = getattr(loader, "generate_train_batch", None)
+        assert generate is not None, f"{where} has no generate_train_batch"
+        # `textwrap.dedent`, not `inspect.cleandoc`: cleandoc is for docstrings and leaves
+        # the first line's indentation alone, so a method's source fails to parse.
+        tree = ast.parse(textwrap.dedent(inspect.getsource(generate)))
+        emitted = {
+            ast.literal_eval(key)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)
+            for key in node.value.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        assert "keys" in emitted, (
+            f"{where}.generate_train_batch returns {sorted(emitted)} and no 'keys'. Without "
+            "a case identifier in the batch there is nothing to join the per-case channel "
+            "mask onto, and the masked fit has no delivery mechanism at all"
+        )
+        assert {"data", "target"} <= emitted, (
+            f"{where}.generate_train_batch returns {sorted(emitted)}; the trainer's own "
+            "train_step reads 'data' and 'target'"
+        )
+
     train_step = inspect.getsource(nnUNetTrainer.train_step)
     assert "'data'" in train_step and "'target'" in train_step, train_step[:400]
 # --------------------------------------------------------------------------------------

@@ -153,18 +153,16 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # The trainer imports rather than reimplements because a trainer that wrote its own bundle
 # writer would be a second implementation of `MOS-TRAIN-129`'s layout, and the platform
 # would then be reading a format nobody checked it still emits. That argument survives the
-# correction unchanged -- and `MOS-IMG-003` already names where those shared modules
-# belong: a `medicalos-preprocessing` package both images install, which this repository
-# has not built.
+# correction unchanged -- and where those shared modules live is now the SDK inside this
+# very distribution: `medos.sdk`, the home `MOS-IMG-003`'s contracts were moved into when
+# the platform became the SDK.
 COPY pyproject.toml /app/pyproject.toml
+# The package INCLUDING THE SDK: `medos/medos/sdk/` is where `MOS-IMG-003`'s contracts
+# live now (`medos.sdk`), carried by the one COPY of `medos/medos`. The fitter reaches
+# it the way the platform does -- `from medos.sdk import ...` -- which is what lets this
+# image install with `--no-deps` and its own pins while both sides still digest through
+# the one canonicaliser.
 COPY medos/medos /app/medos
-# `medicalos_preprocessing/` IS A SEPARATE TOP-LEVEL PACKAGE AND BOTH IMAGES NEED IT.
-# `MOS-IMG-003` requires it published on its own, and 35 modules under `medos/medos/`
-# import it -- `api/routes_training.py`, `api/routes_curation.py`, `core/__init__.py`,
-# `db/audit.py` and nine `evidence/*` among them. Without this line `pip install -e .`
-# installs `medos` against a package that is not in the build context, and the image
-# fails at the first import rather than at build.
-COPY medicalos_preprocessing /app/medicalos_preprocessing
 WORKDIR /app
 RUN pip install --no-cache-dir --no-deps -e .
 

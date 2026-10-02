@@ -1,6 +1,6 @@
 # The medos-trainer image's dependency set, pinned exactly.
 #
-# WHY THIS FILE IS NOT `medos/deploy/compose/requirements.txt`
+# WHY THIS FILE IS NOT `deploy/compose/requirements.txt`
 # ------------------------------------------------------
 # It is the whole point of the separation. `MOS-TRAIN-225` forbids the nnU-Net planner
 # and `nnUNetPlansManager` from the SERVING image's import closure, and
@@ -24,29 +24,79 @@
 # image and leave the loader to choose -- which is a reproducibility hole in the one
 # record `MOS-TRAIN-126` exists to make trustworthy. The driver is not in the image and
 # must not be: it is injected by the container runtime from the host.
---extra-index-url https://download.pytorch.org/whl/cu124
+# BUMPED FROM cu124 TO cu128 FOR BLACKWELL, AND THE REASON IS A MEASUREMENT.
+# `torch==2.5.1+cu124` is compiled for `sm_50 sm_60 sm_70 sm_75 sm_80 sm_86 sm_90` --
+# read out of the wheel with `torch.cuda.get_arch_list()`, not inferred. An RTX 5090 is
+# `sm_120`, so that build has no kernel for it and the first launch on such a card fails
+# outright. There is no PTX path across the gap either: the cu124 wheels carry sm_90 PTX,
+# which does not JIT forward to a later major architecture.
+#
+# THE PIN STAYS EXACT, for the reason it was exact before: `MOS-REL-037` forbids a
+# compatibility range on a recorded version, and `backend_versions` in
+# MEDOS_TRAINING_ENVIRONMENT is a recorded version. This is a new pin, not a loosened one.
+#
+# WHAT THIS BUMP DOES NOT TOUCH, AND WHY THAT MATTERS. The base image stays
+# `python:3.11.16-slim-bookworm` and numpy stays `1.26.4`, so the two things the golden
+# fixture is recorded against are unchanged -- `medos/medos/training/fixtures.py` records
+# `PHANTOM_SHA256` and `GOLDEN_TENSOR_SHA256` under numpy 1.26.4 on CPython 3.11, and the
+# chain that computes them is `medos.training.preprocess` over numpy/scipy, which has no
+# torch in it at all (`RESAMPLER_ID` names this module, not a framework). So the fixture
+# hashes MUST NOT move across this bump, and `tests/unit/test_preprocessing.py` is what
+# says whether they did rather than this comment.
+--extra-index-url https://download.pytorch.org/whl/cu128
 
-torch==2.5.1+cu124
+torch==2.7.1+cu128
 
 # nnU-Net v2. `MOS-TRAIN-135` permits `training_backend.kind = "nnunet"` and
 # `MOS-TRAIN-223`'s mapping table is written against this version's `plans.json` key
 # names -- `configurations.3d_fullres.spacing`, `transpose_forward`,
 # `foreground_intensity_properties_per_channel`. A major bump renames those keys, and
-# `medicalos_preprocessing.autoconfig.export_spec_fields` is written to REFUSE rather than drop a
+# `medos.training.autoconfig.export_spec_fields` is written to REFUSE rather than drop a
 # renamed field to a default, so a bump here fails the export loudly. That is why this is
 # `==` and not `~=`.
-nnunetv2==2.5.1
+# BUMPED 2.5.1 -> 2.6.4 BECAUSE 2.5.1 CANNOT RUN ON THE torch ABOVE, AND UPSTREAM FIXED IT.
+# `PolyLRScheduler.__init__` in 2.5.1 and 2.5.2 calls
+#     super().__init__(optimizer, current_step if current_step is not None else -1, False)
+# and that third positional argument is `verbose`, which torch removed in 2.7. The fit dies
+# 34 seconds in with `LRScheduler.__init__() takes from 2 to 3 positional arguments but 4
+# were given` -- inside `configure_optimizers`, before the first batch. 2.6.4 drops the
+# argument; the diff between the two files is that one line.
+#
+# WHY THE BUMP AND NOT A SUBCLASS OF OUR OWN. Overriding `configure_optimizers` to build a
+# torch-2.7-safe scheduler would have kept this pin and the already-derived plans, and it
+# was written first. It is the wrong trade: it means carrying our own copy of a bug its
+# author has already fixed, transcribing nnU-Net's SGD and poly schedule into code we own,
+# and owning any later divergence from them. `MOS-REL-032` -- adopt the adopted thing whole.
+#
+# WHAT WAS CHECKED BEFORE MOVING, because the `==` above exists for a reason. The comment
+# that follows it says a bump renames `plans.json` keys and `export_spec_fields` REFUSES
+# rather than defaults. Every key `MOS-TRAIN-223`'s mapping reads -- `configurations.
+# 3d_fullres.{spacing,patch_size,normalization_schemes,use_mask_for_norm}`,
+# `transpose_forward`, `foreground_intensity_properties_per_channel.0.{mean,std,
+# percentile_00_5,percentile_99_5}` -- was grepped in 2.6.4's planner and preprocessor and
+# is still there. That is a static check, not a promise: the refusal in the exporter is
+# what actually enforces it, and a `plan` phase is what runs it.
+#
+# THE COST IS A RE-DERIVATION. The plans frozen before this bump came from 2.5.1's planner.
+# Fitting against them with 2.6.4 would be the image/plan drift this project keeps finding
+# in other forms, so both arms' `plan` phases are re-run. Measured: 52 minutes each.
+nnunetv2==2.6.4
 
 # nnU-Net's own stack, pinned rather than left to the resolver: `MOS-REL-037` forbids a
 # range on a recorded version, and `backend_versions` in MEDOS_TRAINING_ENVIRONMENT is a
 # recorded version.
 acvl-utils==0.2.3
-dynamic-network-architectures==0.3.1
+# THESE TWO MOVED WITH nnunetv2 2.6.4, WHICH REQUIRES THEM. Read out of its own
+# `pyproject.toml` rather than discovered one pip failure at a time:
+# `dynamic-network-architectures>=0.4.1,<0.5` and `batchgeneratorsv2>=0.3.0`. The pins stay
+# exact for the reason above -- a recorded version takes no range -- and the versions chosen
+# are the newest inside each declared bound.
+dynamic-network-architectures==0.4.4
 batchgenerators==0.25.1
-batchgeneratorsv2==0.2.1
+batchgeneratorsv2==0.3.5
 
 # numpy is the platform's pin, restated because it is load-bearing in BOTH images:
-# `medicalos_preprocessing.fixtures.PHANTOM_SHA256` and `GOLDEN_TENSOR_SHA256` are byte-exact
+# `medos.training.fixtures.PHANTOM_SHA256` and `GOLDEN_TENSOR_SHA256` are byte-exact
 # hashes recorded under numpy 1.26.4 on CPython 3.11, and `MOS-TRAIN-133`'s check
 # compares against them. nnU-Net 2.5.1 is a numpy<2 consumer, so the two agree here;
 # when they stop agreeing the golden fixture has to be re-recorded by a human who read
@@ -65,7 +115,19 @@ numpy==1.26.4
 # cryptography. The trainer serves nothing, authenticates nobody and signs nothing.
 psycopg[binary]==3.2.3
 
-# The image I/O nnU-Net reads NIfTI with, and the resampler `medicalos_preprocessing.spec`'s
+# THE PREPROCESSED-DATA FORMAT, AND IT IS NEW HERE. nnU-Net 2.6 stopped unpacking `.npz`
+# into `.npy` before a fit and now reads a blosc2-compressed array in place -- which is why
+# `unpack_dataset` vanished from its trainer signature. So this library is not a transitive
+# convenience: it is how every preprocessed voxel is written in the `plan` phase and read in
+# the `fit` phase, and a change in it is a change in the data the run trains on.
+#
+# 3.x AND NOT 4.x, DELIBERATELY. nnunetv2 2.6.4 declares `blosc2>=3.0.0b1` with no upper
+# bound, so pip would take 4.13.1 -- a major line released AFTER 2.6.4 and therefore one no
+# version of nnU-Net has been run against. Pinned to the newest 3.x, which is the line the
+# reading and writing code was written for.
+blosc2==3.12.2
+
+# The image I/O nnU-Net reads NIfTI with, and the resampler `medos.training.spec`'s
 # `backend.resampler` names. Pinned to the version the platform's spec fixtures declare.
 SimpleITK==2.3.1
 nibabel==5.2.1
@@ -82,3 +144,23 @@ yacs==0.1.8
 imagecodecs==2024.9.22
 connected-components-3d==3.19.0
 fft-conv-pytorch==1.2.0
+
+# MONAI, FOR ITS NETWORK ZOO AND FOR NOTHING ELSE.
+#
+# 1.5.2 AND NOT LATER, established from the published metadata rather than guessed: 1.6.0
+# requires `torch>=2.8.0` and would drag the torch above; 1.5.0 pins `torch<2.7.0` and refuses to
+# install on it; 1.4.0 pins `numpy<2.0`. 1.5.2 declares `torch>=2.4.1` with no upper bound and
+# `numpy<3.0,>=1.24`, so it is the newest release this image can carry.
+#
+# IT ADDS NOTHING TRANSITIVELY. MONAI's base requirements are torch and numpy, both already
+# here; every other package it names sits behind an `extra`. `einops`, which SwinUNETR and UNETR
+# need -- UNETR through ViT -> TransformerBlock -> SABlock, which builds a `Rearrange`
+# unconditionally -- is already pulled in by nnunetv2 2.6.4 itself.
+#
+# WHAT IT IS FOR: `SegResNetDS`, `SwinUNETR` and `UNETR` as architectures a frozen plan can name,
+# reached through a first-party wrapper with nnU-Net's own calling convention. MONAI's classes
+# cannot be named in a plan directly -- `get_network_from_plans` calls
+# `nw_class(input_channels=..., num_classes=..., deep_supervision=..., **arch_kwargs)` and theirs
+# take none of those names. The register's MONAI Core row is already ADOPT and lists "the 3D
+# network zoo", which is why this is a dependency and not three re-implementations.
+monai==1.5.2

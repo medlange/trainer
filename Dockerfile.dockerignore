@@ -9,7 +9,6 @@
 # a commit for a tree it was not built from.
 *
 !medos/medos/
-!medicalos_preprocessing/
 !pyproject.toml
 !trainer/
 

@@ -36,6 +36,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 TRAINER = Path(__file__).resolve().parents[1]
 if str(TRAINER) not in sys.path:
@@ -290,3 +291,180 @@ def test_the_micro_iou_matches_the_micro_dice() -> None:
     assert _reported_micro_iou(trainer) == pytest.approx(
         micro_dice / (2 - micro_dice), abs=1e-4
     )
+
+
+# =====================================================================================
+# The switch, asserted on the mask itself
+#
+# `empty_segment_is_negative` sat in `supervision.json` from the beginning and reached
+# exactly one place: a log line. `_mask_for` built the mask from `cases` regardless, so a
+# document saying `true` produced a run that ANNOUNCED the unmasked semantics in its own
+# log and masked anyway. The record contradicted the computation, which is worse than
+# having no field.
+#
+# Asserted on the unbound method against a minimal stand-in rather than a constructed
+# trainer: `nnUNetTrainerMaskedChannels.__init__` wants plans, a dataset, a fold and a
+# device, and none of that is what this is about. What is about to be wrong, if it goes
+# wrong, is these fifteen lines.
+# =====================================================================================
+class _Stand:
+    """The four attributes `_mask_for` reads, and nothing else."""
+
+    def __init__(self, unmasked: bool) -> None:
+        self._unmasked = unmasked
+        self._channels = ["neo", "effusion", "pneumonia"]
+        self._supervision = {"c1": ["neo"], "c2": ["effusion", "pneumonia"]}
+        self.seen_cases: set[str] = set()
+
+
+def _mask(unmasked: bool, keys=("c1", "c2")):
+    stand = _Stand(unmasked)
+    mask = nnUNetTrainerMaskedChannels._mask_for(
+        stand, keys, len(keys), torch.device("cpu")
+    )
+    return mask, stand
+
+
+def test_the_masked_arm_supervises_only_what_the_cohort_declared() -> None:
+    mask, _ = _mask(False)
+    assert mask.tolist() == [[1.0, 0.0, 0.0], [0.0, 1.0, 1.0]], mask.tolist()
+
+
+def test_the_control_arm_supervises_every_channel_on_every_case() -> None:
+    """THE SWITCH. Unmasked means an unannotated finding reaches the loss as background --
+    the false-negative signal the subsystem exists to remove, and therefore exactly what
+    a control arm has to do in order to measure it."""
+    mask, _ = _mask(True)
+    assert mask.tolist() == [[1.0] * 3, [1.0] * 3], mask.tolist()
+
+
+def test_both_arms_record_the_cases_they_saw() -> None:
+    """The control arm still walks the keys. Returning ones early would skip `seen_cases`
+    and the missing-key refusal, making the control the one place a case absent from the
+    map passes silently -- so the two arms would differ in more than the mask, which is
+    the one thing a controlled comparison may not do."""
+    for unmasked in (False, True):
+        _, stand = _mask(unmasked)
+        assert stand.seen_cases == {"c1", "c2"}, (unmasked, stand.seen_cases)
+
+
+def test_a_case_absent_from_the_map_is_refused_in_both_arms() -> None:
+    for unmasked in (False, True):
+        with pytest.raises(KeyError, match="ghost"):
+            _mask(unmasked, keys=("c1", "ghost"))
+
+
+# =====================================================================================
+# The VRAM budget is taken from what is FREE, not from what the card has
+#
+# `_vram_target` read `total_memory` and returned `total - 2`. On an idle card that is
+# right. On a shared one it is not: a 32.6 GB card with 2.2 GB held by a neighbour yielded
+# a 30.6 GB budget against 30.3 GB actually free, and the planner then sized a patch for
+# memory that did not exist -- a fit that dies in epoch 1 with the fingerprint frozen.
+#
+# It was caught by reading `nvidia-smi` before launching, which is not a check. These are.
+# =====================================================================================
+class _FakeCuda:
+    """`torch.cuda`'s three answers, and nothing else."""
+
+    def __init__(self, free_gb: float, total_gb: float) -> None:
+        self._free = int(free_gb * 1024 ** 3)
+        self._total = int(total_gb * 1024 ** 3)
+
+    def is_available(self) -> bool:
+        return True
+
+    def mem_get_info(self, index: int = 0):
+        return self._free, self._total
+
+
+def _observe(monkeypatch, free_gb: float, total_gb: float, override: str | None = None):
+    from medos_trainer import backend
+
+    monkeypatch.setattr(torch, "cuda", _FakeCuda(free_gb, total_gb), raising=False)
+    if override is None:
+        monkeypatch.delenv("MEDOS_TRAINER_VRAM_GB", raising=False)
+    else:
+        monkeypatch.setenv("MEDOS_TRAINER_VRAM_GB", override)
+    return backend.vram_observation()
+
+
+def test_a_neighbour_on_the_card_reduces_the_budget(monkeypatch) -> None:
+    """THE MEASURED CASE. 32.6 GB card, 2.2 GB held by somebody else: the budget must come
+    off the 30.4 GB that are free, not off the 32.6 the card has."""
+    seen = _observe(monkeypatch, free_gb=30.4, total_gb=32.6)
+    assert seen["budget_gb"] == 28.4, seen
+    assert seen["held_by_others_gb"] == 2.2, seen
+
+
+def test_an_idle_card_is_unchanged_by_the_fix(monkeypatch) -> None:
+    """The old behaviour was right in this case, and must stay right: nothing held, so
+    free equals total and the margin comes off the whole card."""
+    seen = _observe(monkeypatch, free_gb=32.6, total_gb=32.6)
+    assert seen["budget_gb"] == 30.6, seen
+    assert seen["held_by_others_gb"] == 0.0, seen
+
+
+def test_the_observation_is_recorded_and_not_just_the_number(monkeypatch) -> None:
+    """The budget is a SNAPSHOT: the fit it plans for starts hours later, with different
+    neighbours. Nothing here can fix that; writing down what was assumed is what makes a
+    later OOM attributable instead of arguable."""
+    seen = _observe(monkeypatch, free_gb=20.0, total_gb=32.6)
+    for key in ("source", "free_gb", "total_gb", "held_by_others_gb", "margin_gb", "budget_gb"):
+        assert key in seen, (key, seen)
+    assert seen["source"] == "observed"
+
+
+def test_an_override_is_recorded_as_an_override_and_flagged_when_it_exceeds_free(monkeypatch) -> None:
+    """Asking for more than is free is how a deployment says "the neighbour will be gone by
+    then". It may be right, so it is not refused -- but it must not be indistinguishable
+    from a measurement, or an OOM later has no attributable cause."""
+    seen = _observe(monkeypatch, free_gb=10.0, total_gb=32.6, override="24")
+    assert seen["source"] == "override" and seen["budget_gb"] == 24.0, seen
+    assert seen["exceeds_free"] is True, seen
+
+    modest = _observe(monkeypatch, free_gb=30.0, total_gb=32.6, override="12")
+    assert modest["exceeds_free"] is False, modest
+
+
+def test_the_budget_never_falls_below_the_floor(monkeypatch) -> None:
+    """A budget under the floor produces a patch so small that `3d_fullres` stops being
+    one. Clamping is not hiding the problem: the observation still reports 0.5 GB free."""
+    seen = _observe(monkeypatch, free_gb=0.5, total_gb=32.6)
+    assert seen["budget_gb"] == 4.0, seen
+    assert seen["free_gb"] == 0.5, seen
+
+
+def test_the_plan_carries_the_observation() -> None:
+    """`derive_plan` must put it in `plan.json`: a number nobody can read afterwards is
+    not a record. And it must take the observation ONCE -- two calls on a shared card
+    return two different numbers, and the plan would then record neither.
+
+    READ AS A SYNTAX TREE, NOT AS TEXT. The first version of this grepped the source for
+    `_vram_target()` and failed on a COMMENT inside `derive_plan` that explains why two
+    calls would be wrong. A text search cannot tell code from prose about code; `ast`
+    can, and the same mistake has already cost this project a renamed translation key
+    that collided with a grep-based gate.
+    """
+    import ast
+    import inspect
+
+    from medos_trainer import backend
+
+    tree = ast.parse(inspect.getsource(backend.derive_plan))
+    called = {
+        node.func.id for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "vram_observation" in called, "derive_plan must observe the card itself"
+    assert "_vram_target" not in called, (
+        "derive_plan calls _vram_target as well; the observation must be taken once and "
+        "that one value used for both the planner and the record"
+    )
+    # The value reaches the returned document under a key a reader can find.
+    returns = [n for n in ast.walk(tree) if isinstance(n, ast.Return)]
+    keys = {
+        k.value for r in returns if isinstance(r.value, ast.Dict)
+        for k in r.value.keys if isinstance(k, ast.Constant)
+    }
+    assert "vram" in keys, ("plan.json carries no `vram` key: %s" % sorted(keys))

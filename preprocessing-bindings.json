@@ -10,7 +10,7 @@
     "edits the spec, silently false afterwards, and false inside the binding.",
     "",
     "`spec_document` is resolved against the image's own copy of the shared package.",
-    "`medicalos_preprocessing.fixtures.selftest_spec_document()` is the spec this deployment",
+    "`medos.sdk.fixtures.selftest_spec_document()` is the spec this deployment",
     "ships for a label capability: MOS-IMG-054's self-test executes it end to end and",
     "MOS-TRAIN-133 pins its golden hashes, so it is the one spec on this deployment that",
     "is known to be executable rather than merely well-formed. A site with a registered",
@@ -22,11 +22,11 @@
   ],
   "capabilities": {
     "lung_segmentation": {
-      "spec_document": "medicalos_preprocessing.fixtures:selftest_spec_document",
+      "spec_document": "medos.sdk.fixtures:selftest_spec_document",
       "output_kind": "label"
     },
     "pleural_effusion": {
-      "spec_document": "medicalos_preprocessing.fixtures:selftest_spec_document",
+      "spec_document": "medos.sdk.fixtures:selftest_spec_document",
       "output_kind": "label"
     }
   }

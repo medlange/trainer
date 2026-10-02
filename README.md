@@ -1,14 +1,28 @@
-# `medos-trainer` — the image that actually touches the pixels
+# Medlange Trainer
+
+**`medos-trainer` — the image that actually touches the pixels.**
+
+Part of the [Medlange](../README.md) umbrella: Medlange Trainer fits models in the
+lineage of nnU-Net and MONAI and writes the medlange.modelcard/1 card that
+[Medlange Core](../medos/medos/sdk/README.md) reads to rebuild each model's
+preprocessing pipeline.
 
 This directory is a **second deployable**. `medos/medos` — the API, the worker, the
 gateway — carries no torch, no MONAI and no nnU-Net, and that separation is load-bearing
-rather than tidy: `medicalos_preprocessing/chain.py` generates MONAI Bundle configs as *data* and
+rather than tidy: `medos/medos/sdk/chain.py` generates MONAI Bundle configs as *data* and
 never imports MONAI; `MOS-TRAIN-225` forbids the nnU-Net planner and `nnUNetPlansManager`
 from the serving image's import closure *by name*; `MOS-REL-108` forbids in-process
 plugin loading. `tests/integration/test_trainer_boundary.py` holds all of it.
 
 The platform starts this image's entrypoint and talks to it over **files and an exit
 code**. Nothing else.
+
+**Position in the product map: the trainer is a training pipeline in the lineage of
+nnU-Net and MONAI, not an application.** It ships no web surface and never did — no HTTP
+server, no UI, no socket of any kind. Operators and scripts drive it through the
+platform's training-plane API (`/api/v1/training-runs` and the curation routes of chapter
+10); the no-code console that once wrapped that API was withdrawn at specification 0.4.0
+(`MOS-UI-100` CUT, register entry 150).
 
 ## Tests
 
@@ -42,8 +56,8 @@ measured. A headcount goes stale every time somebody adds a file. The boundary d
 `plan`, `fit`,
 `declare-environment` and `doctor` — the fitter — take `--run-dir`, read a directory, fit
 a model and write a bundle, reaching nothing outside themselves but
-`medicalos_preprocessing`, the package `MOS-IMG-003` requires and that both images
-install. That is what makes this tree installable by somebody with no MedicalOS.
+`medos.sdk`, the SDK inside the `medos` distribution that both images install. That is
+what makes this tree installable by somebody with no MedicalOS.
 
 It reached **ten** platform modules when the separation started.
 
@@ -84,7 +98,7 @@ two permitted ones:
 
 | | nnU-Net v2 | Auto3DSeg |
 |---|---|---|
-| `MOS-TRAIN-223`'s mapping table | `medicalos_preprocessing/autoconfig.py::DERIVED_QUANTITIES` already names v2 `plans.json` keys — `configurations.3d_fullres.spacing`, `transpose_forward`, `foreground_intensity_properties_per_channel.0.percentile_00_5` | its column points at `hyper_parameters.canonical_axis_order` and `hyper_parameters.crop_mode`, which `AutoRunner` does not emit under those names |
+| `MOS-TRAIN-223`'s mapping table | `medos/medos/sdk/autoconfig.py::DERIVED_QUANTITIES` already names v2 `plans.json` keys — `configurations.3d_fullres.spacing`, `transpose_forward`, `foreground_intensity_properties_per_channel.0.percentile_00_5` | its column points at `hyper_parameters.canonical_axis_order` and `hyper_parameters.crop_mode`, which `AutoRunner` does not emit under those names |
 | fingerprint document | one file, `plans.json`, one digest | `datastats.yaml` **plus** a per-algorithm `hyper_parameters.yaml`; `fingerprint_digest` is one `sha256_digest` column |
 | natural output | one network at one fold | N algorithms and a combination rule — `MOS-TRAIN-227`'s ensemble machinery before the first registrable artifact |
 | spec specificity | `MOS-TRAIN-135`/`-136`/`-137` name it and its freeze explicitly | referenced, never pinned to a key |
@@ -99,7 +113,7 @@ fingerprint documents behind one `pip freeze`.
 ## 3. The entrypoint contract
 
 `medos/medos/training/orchestrator.py::RUN_DIRECTORY` is the normative spelling;
-`medicalos_preprocessing/contract.py` holds it for both sides, and
+`medos/medos/sdk/contract.py` holds it for both sides, and
 `tests/unit/test_trainer_contract.py` asserts the two agree.
 
 ```
@@ -234,13 +248,13 @@ about provenance: `MOS-EVID-021`'s de-identification status is recorded on the
    it must never reach `PreprocessingSpec.patch.batch_size` — is enforced in
    `packaging.derive_spec_document`.
 2. **The shipped exporter cannot read a real nnU-Net `plans.json`.**
-   `medicalos_preprocessing/autoconfig.py` maps `foreground_crop` from
+   `medos/medos/sdk/autoconfig.py` maps `foreground_crop` from
    `configurations.3d_fullres.use_mask_for_norm` and `_coerce` handles a `bool`; nnU-Net
    v2 writes a **list of bools, one per channel**, which falls through to the string
    branch and is refused as `crop_mode_not_mapped`. `backend.single_channel_view`
    flattens that one key for a single-channel dataset and **refuses** for more than one
    rather than taking the first channel's value. The fix belongs in
-   `medicalos_preprocessing/autoconfig.py`, which this change does not own.
+   `medos/medos/sdk/autoconfig.py`, which this change does not own.
 3. **`MOS-TRAIN-223`'s "that spec MUST be the registered one" is satisfied downstream,
    not by the run binding.** The run binds the *declared* spec's digest at submit; the
    derived spec exists only after the planner has run. The bundle carries the derived
@@ -254,8 +268,8 @@ about provenance: `MOS-EVID-021`'s de-identification status is recorded on the
 5. **`preprocessing.version` is the spec's major.** `routes_training` reads it as an
    `int` and the shipped spec documents version themselves `"1.0.0"`.
 6. **The exporter's axis alphabet is not the parser's, and no real plan can be
-   transcribed on the shipped code.** `medicalos_preprocessing/autoconfig.py::_coerce` maps
-   nnU-Net's `transpose_forward` to `z`/`y`/`x`; `medicalos_preprocessing/spec.py::parse_spec`
+   transcribed on the shipped code.** `medos/medos/sdk/autoconfig.py::_coerce` maps
+   nnU-Net's `transpose_forward` to `z`/`y`/`x`; `medos/medos/sdk/spec.py::parse_spec`
    refuses anything that is not a permutation of `k`/`j`/`i`. Found by running it: the
    first real plan produced `axis_order: ["x","z","y"]` and
    `ChainRefused: axis_order: must be a permutation of ['k','j','i']`.

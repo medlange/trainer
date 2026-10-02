@@ -3,8 +3,8 @@
 
 WHAT THIS MODULE DOES NOT DO, AND WHY THAT IS THE POINT
 ---------------------------------------------------------
-It does not write a bundle. `medicalos_preprocessing.bundle.write_bundle` writes it and
-`medicalos_preprocessing.bundle.verify` reads it back, and this module calls both -- the same two
+It does not write a bundle. `medos.sdk.bundle.write_bundle` writes it and
+`medos.sdk.bundle.verify` reads it back, and this module calls both -- the same two
 functions the platform calls. `MOS-TRAIN-129` fixes the layout, `MOS-TRAIN-130` fixes the
 metadata contract and `MOS-TRAIN-131` requires `configs/inference.json` to be "generated
 from the registered `PreprocessingSpec` by a single generator ... byte-reproducible from
@@ -12,7 +12,7 @@ the spec alone". A trainer with its own packager would be a SECOND implementatio
 three, and the failure mode is the quiet one: a platform verifying a bundle against a
 layout the trainer stopped emitting, which passes until the day it does not.
 
-It does not transcribe the fingerprint either. `medicalos_preprocessing.autoconfig.
+It does not transcribe the fingerprint either. `medos.sdk.autoconfig.
 export_spec_fields` does that, under `MOS-TRAIN-223`'s fixed mapping table, and it
 "MUST refuse to emit for any derived quantity it cannot map exactly". What is here is the
 MERGE -- putting the exporter's dotted field paths into the bound spec document -- and the
@@ -30,7 +30,7 @@ a different tensor. Carrying the old hash forward would make `MOS-IMG-054`'s sta
 self-test fail on a correct model, and, worse, would make it PASS on an incorrect one if
 the constants happened to round back.
 
-`medicalos_preprocessing.preprocess.record_golden` is the ONE recorder (`MOS-TRAIN-134`,
+`medos.sdk.preprocess.record_golden` is the ONE recorder (`MOS-TRAIN-134`,
 `MOS-IMG-058`) and is what is called here. There is no second hashing function in this
 file and no comparison: `MOS-TRAIN-065` forbids an operation that RE-records an existing
 fixture, and this is the first recording for a spec that did not exist until the planner
@@ -56,12 +56,13 @@ MOS-IMG-058.
 from __future__ import annotations
 
 import io
+import json
 import math
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
 
-from medicalos_preprocessing.contract import ContractViolation
+from medos.sdk.contract import ContractViolation
 
 __all__ = [
     "MONAI_BUNDLE_TARGET",
@@ -69,6 +70,7 @@ __all__ = [
     "golden_fixture_bytes",
     "torchscript_bytes",
     "write_candidate_bundle",
+    "write_modelcard",
 ]
 
 #: The MONAI version `medos/medos/training/chain.py`'s generated `configs/inference.json`
@@ -81,7 +83,7 @@ __all__ = [
 #: `sliding_window_inference` have had these signatures since 1.3.
 MONAI_BUNDLE_TARGET: Final[str] = "1.4.0"
 
-#: `medicalos_preprocessing.bundle.write_bundle`'s three serialised forms. TorchScript is chosen
+#: `medos.sdk.bundle.write_bundle`'s three serialised forms. TorchScript is chosen
 #: here because `MOS-TRAIN-154`'s table admits it, because it is the form a torch trainer
 #: can emit without a second conversion tool, and because `MOS-TRAIN-159` to
 #: `MOS-TRAIN-169`'s conversion-equivalence checks are a `ConversionRun`'s job and not a
@@ -102,7 +104,7 @@ _WEIGHTS_FORMAT: Final[str] = "torchscript"
 #:
 #: The translation below is EXACT and is not a substitution: both alphabets name the
 #: same three axes in the same order -- `k`/`z` the slice axis, `j`/`y` the row,
-#: `i`/`x` the column, which is `medicalos_preprocessing.preprocess.ChainInput`'s documented
+#: `i`/`x` the column, which is `medos.sdk.preprocess.ChainInput`'s documented
 #: `(C, K, J, I)` and `CanonicalVolume`'s `[k, j, i]`. Anything not in this map is left
 #: alone so that a genuinely unmappable value still reaches the parser and is refused
 #: there, rather than being quietly renamed here.
@@ -138,9 +140,9 @@ def derive_spec_document(
     deployment's and is carried through unchanged, because the fingerprint has nothing to
     say about it and inventing a value would be the substitution `MOS-TRAIN-223` forbids.
     """
-    from medicalos_preprocessing.fixtures import phantom, phantom_input
-    from medicalos_preprocessing.preprocess import record_golden
-    from medicalos_preprocessing.spec import parse_spec
+    from medos.sdk.fixtures import phantom, phantom_input
+    from medos.sdk.preprocess import record_golden
+    from medos.sdk.spec import parse_spec
 
     document: dict[str, Any] = _deep_copy(bound)
     for path, value in dict(plan["spec_fields"]).items():
@@ -215,8 +217,8 @@ def _array_digest(array: Any) -> str:
 
 
 def _phantom_input(array: Any) -> Any:
-    from medicalos_preprocessing.fixtures import PHANTOM_AXCODES, PHANTOM_SPACING_MM
-    from medicalos_preprocessing.preprocess import ChainInput
+    from medos.sdk.fixtures import PHANTOM_AXCODES, PHANTOM_SPACING_MM
+    from medos.sdk.preprocess import ChainInput
 
     return ChainInput(
         arrays={"image": array}, spacing_mm=PHANTOM_SPACING_MM, axcodes=PHANTOM_AXCODES
@@ -233,7 +235,7 @@ def _phantom_shape_for(document: Mapping[str, Any]) -> tuple[int, int, int] | No
     Returns `None` when the shipped shape already suffices, so the common case uses the
     fixture `MOS-TRAIN-133` pins byte-for-byte.
     """
-    from medicalos_preprocessing.fixtures import PHANTOM_SHAPE, PHANTOM_SPACING_MM
+    from medos.sdk.fixtures import PHANTOM_SHAPE, PHANTOM_SPACING_MM
 
     patch = [int(n) for n in document["patch"]["size_voxels"]]
     target = [float(v) for v in document["target_spacing_mm"]]
@@ -261,10 +263,9 @@ def golden_fixture_bytes(spec_document: Mapping[str, Any]) -> tuple[bytes, bytes
     """
     import nibabel as nib
     import numpy as np
-
-    from medicalos_preprocessing.fixtures import PHANTOM_SPACING_MM, phantom
-    from medicalos_preprocessing.preprocess import first_patch, model_space_tensor
-    from medicalos_preprocessing.spec import parse_spec
+    from medos.sdk.fixtures import PHANTOM_SPACING_MM, phantom
+    from medos.sdk.preprocess import first_patch, model_space_tensor
+    from medos.sdk.spec import parse_spec
 
     spec = parse_spec(dict(spec_document))
     shape = _phantom_shape_for(spec_document)
@@ -335,14 +336,14 @@ def write_candidate_bundle(
     classes: int,
     versions: Mapping[str, str],
 ) -> Any:
-    """Write `MOS-TRAIN-129`'s layout and return `medicalos_preprocessing.bundle`'s own report.
+    """Write `MOS-TRAIN-129`'s layout and return `medos.sdk.bundle`'s own report.
 
     The return value is a `BundleReport` from `verify()`, not a dict this module built:
     `bundle_digest` and `weights_digest` are what the PLATFORM will read back, and a
     trainer that reported its own numbers would be reporting a bundle it had not verified.
     """
-    from medicalos_preprocessing.bundle import metadata_document, write_bundle
-    from medicalos_preprocessing.spec import parse_spec
+    from medos.sdk.bundle import metadata_document, write_bundle
+    from medos.sdk.spec import parse_spec
 
     spec = parse_spec(dict(spec_document))
     label_set = list((dict(spec_document).get("io") or {}).get("label_set") or [])
@@ -389,3 +390,58 @@ def write_candidate_bundle(
         golden_tensor=tensor,
         checkpoint=checkpoint,
     )
+
+
+def write_modelcard(
+    root: str | Path,
+    *,
+    spec_document: Mapping[str, Any],
+    bundle_dir: str,
+    weights_file: str,
+    weights_digest: str,
+    versions: Mapping[str, str],
+    stamp: Mapping[str, Any],
+) -> Path:
+    """Write `medlange.modelcard/1` next to the bundle: the SDK-readable declaration.
+
+    The card is how a consumer of the SDK reconstructs what inference needs WITHOUT the
+    training run's database: the spec (which is the record of what training did,
+    `MOS-IMG-046`), the weights' path and digest, the framework versions that produced
+    them, and the outputs the model claims. `medos.sdk.modelcard.ModelCard.load` is the
+    reader and `ModelCard.chain()` the preprocessing pipeline.
+
+    The outputs descriptor is derived from the REGISTERED spec's label set (`io.label_set`),
+    not from nnU-Net's dataset.json -- the registered spec is what `MOS-TRAIN-136` makes
+    authoritative, and the card is a promise about the registered thing.
+    """
+    from medos.sdk.modelcard import CARD_FILENAME, document_for
+    from medos.sdk.spec import parse_spec
+
+    spec = parse_spec(dict(spec_document))
+    label_set = list((dict(spec_document).get("io") or {}).get("label_set") or [])
+    document = document_for(
+        model_id=spec.model_id,
+        model_version=spec.model_version,
+        spec_document=spec_document,
+        weights={
+            "path": bundle_dir,
+            "weights_file": weights_file,
+            "format": _WEIGHTS_FORMAT,
+            "digest": weights_digest,
+        },
+        frameworks={
+            "monai_bundle": MONAI_BUNDLE_TARGET,
+            "torch": str(versions["torch"]),
+            "numpy": str(versions["numpy"]),
+        },
+        outputs=tuple(
+            {"kind": "segmentation", "value": entry["value"], "name": entry["name"]}
+            for entry in label_set
+        ),
+        stamp=dict(stamp),
+    )
+    path = Path(root) / CARD_FILENAME
+    path.write_text(
+        json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return path

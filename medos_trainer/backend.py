@@ -76,17 +76,55 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
-from medicalos_preprocessing.contract import CohortEntry, ContractViolation, RunDirectory, RunRequest
+from medos_trainer.training import (
+    TrainingConfiguration,
+    TrainingConfigurationError,
+)
+from medos.sdk.contract import CohortEntry, ContractViolation, RunDirectory, RunRequest
+from medos_trainer import BACKEND_KIND, architectures
 
 __all__ = [
     "DATASET_ID",
     "DATASET_NAME",
+    "KIND",
     "apply_determinism",
+    "build_masked_loss",
     "derive_plan",
     "fit",
     "prepare_workspace",
     "single_channel_view",
 ]
+
+#: The value of `training_backend.kind` this module answers for. `port.resolve` checks it
+#: against the registry key, so this module cannot be reached under a name it does not
+#: claim, and `medos_trainer.BACKEND_KIND` -- what `doctor` prints and what
+#: `environment.declare` pins -- is the same string by construction rather than by habit.
+KIND: Final[str] = BACKEND_KIND
+
+
+def build_masked_loss(
+    *, batch_dice: bool, scales: Any = None, focal_gamma: float = 0.0,
+    focal_alpha: float | None = None,
+) -> Any:
+    """The port's loss hook, delegating to `masked_trainer.build_masked_loss`.
+
+    A DELEGATE AND NOT A RE-EXPORT, FOR THE SAME REASON EVERY nnU-NET IMPORT IN THIS FILE IS
+    INSIDE A FUNCTION. `nnunetv2/paths.py` reads its three roots from the environment AT
+    MODULE IMPORT and binds them to constants, so anything that pulls `nnunetv2` before
+    `prepare_workspace` has run sends the run's dataset into the image's default root. A
+    module-level `from medos_trainer.masked_trainer import build_masked_loss` would pull
+    `nnunetv2` at the moment `port.resolve` imported this module -- which is before
+    `prepare_workspace`, because resolving the backend is how the phase finds
+    `prepare_workspace` in the first place.
+
+    So the port gets one uniform surface across backends, and the import ordering the whole
+    file is arranged around survives. The conformance suite calls this, which is the point:
+    it exercises the path the trainer uses rather than a copy of it.
+    """
+    from medos_trainer.masked_trainer import build_masked_loss as _build
+
+    return _build(batch_dice=batch_dice, scales=scales, focal_gamma=focal_gamma,
+                  focal_alpha=focal_alpha)
 
 #: nnU-Net addresses a dataset by a three-digit id and a `DatasetNNN_Name` directory. The
 #: id is constant because each run gets its own `nnUNet_raw`/`nnUNet_preprocessed` root
@@ -95,7 +133,16 @@ __all__ = [
 DATASET_ID: Final[int] = 501
 DATASET_NAME: Final[str] = f"Dataset{DATASET_ID:03d}_MedicalOSCohort"
 
-_CONFIGURATION: Final[str] = "3d_fullres"
+#: THE DEFAULT, not the only one. It was `_CONFIGURATION` -- a module constant read in eight
+#: places, two of them on the fitting side -- and `derive_plan` recorded a `configuration` member
+#: into `plan.json` that NOTHING read back. So a plan recorded for one configuration was fit under
+#: whatever this constant said, and the two could disagree with nothing raising.
+#:
+#: Now: `_configuration()` decides at PLAN time, `derive_plan` records it in the frozen plan, and
+#: `fit` reads it back from there. `MOS-TRAIN-135` freezes the plan at run start, so the
+#: configuration belongs inside the freeze rather than beside it in a constant that a later import
+#: could see differently.
+_DEFAULT_CONFIGURATION: Final[str] = "3d_fullres"
 
 #: `MOS-TRAIN-032`: "nnU-Net's built-in cross-validation split MUST NOT be used as a
 #: `DatasetSplit` ... The pipeline MUST hand nnU-Net a fold assignment derived from the
@@ -206,7 +253,7 @@ def _dataset_json(
     """nnU-Net v2's `dataset.json`.
 
     `channel_names: {"0": "CT"}` is what makes the planner choose `CTNormalization`, which
-    is the ONLY normalisation scheme `medicalos_preprocessing.autoconfig._NORMALISATION_MAP` maps
+    is the ONLY normalisation scheme `medos.sdk.autoconfig._NORMALISATION_MAP` maps
     exactly (`MOS-TRAIN-223`: "fixes CTNormalization -> zscore_dataset and nothing else").
     A non-CT channel name here produces `ZScoreNormalization` and the export then REFUSES,
     which is the correct behaviour and a confusing one to debug -- hence this comment.
@@ -285,8 +332,23 @@ def stage_dataset(
     *,
     raw_root: Path,
     spec_document: Mapping[str, Any],
+    manifest: Sequence[CohortEntry] | None = None,
+    empty_segment_is_negative: bool = False,
 ) -> Path:
-    """Write ONE nnU-Net raw dataset from ONE partition's cases. Links, never copies.
+    """Link ONE partition's cases into the dataset and rewrite its manifest.
+
+    `manifest` IS SEPARATE FROM `cases` BECAUSE THE TWO ARE DIFFERENT SETS, AND THE BUG
+    THAT PROVES IT WAS LIVE. `derive_plan` calls this twice -- fit, then select, with the
+    fingerprint taken in between so no statistic is read from the select partition. Both
+    `dataset.json` and `supervision.json` describe the DATASET, not the call, and the
+    second call was rewriting both from its own 20 cases: `numTraining` dropped from 70
+    to 20, and the supervision map lost every fit case. The map is the one that would
+    have been fatal -- the masked trainer reads it for every case in the batch, and 70 of
+    90 would not have been in it.
+
+    So `cases` is what gets LINKED and `manifest` is what gets DESCRIBED. When `manifest`
+    is omitted they are the same set, which is the only sensible default and what a
+    single-partition caller means.
 
     Hard links where the filesystem allows them and a copy otherwise: a 3D CT corpus is
     tens of gigabytes and duplicating it per run is a deployment problem, but correctness
@@ -315,17 +377,25 @@ def stage_dataset(
         annotation = run.staged_path(case.label, where=f"cohort label {case.case_key}")
         _link(annotation, labels / f"{case.case_key}.nii.gz")
 
+    described = list(manifest) if manifest is not None else list(cases)
     labels = _labels_from_spec(spec_document)
     (dataset / "dataset.json").write_text(
-        json.dumps(_dataset_json(cases, labels=labels), indent=2),
+        json.dumps(_dataset_json(described, labels=labels), indent=2),
         encoding="utf-8",
     )
-    _write_supervision(dataset, cases, labels=labels)
+    _write_supervision(
+        dataset, described, labels=labels,
+        empty_segment_is_negative=empty_segment_is_negative,
+    )
     return dataset
 
 
 def _write_supervision(
-    dataset: Path, cases: Sequence[CohortEntry], *, labels: Mapping[str, Any]
+    dataset: Path,
+    cases: Sequence[CohortEntry],
+    *,
+    labels: Mapping[str, Any],
+    empty_segment_is_negative: bool = False,
 ) -> None:
     """`supervision.json`, from the cohort, beside the dataset the cohort became.
 
@@ -378,7 +448,12 @@ def _write_supervision(
             "gradient -- not a negative."
         ),
         "_written_by": "medos_trainer.backend.stage_dataset, from the sealed cohort",
-        "empty_segment_is_negative": False,
+        # FROM THE REQUEST, NOT A CONSTANT. This was hard-coded `False` while the only
+        # reader of it was a log line -- so the document declared the semantics, the
+        # trainer printed them, and the mask was built from `cases` regardless. Writing
+        # `true` into it changed nothing except what the log claimed, which is worse than
+        # having no field: the run's own record would have contradicted its loss.
+        "empty_segment_is_negative": bool(empty_segment_is_negative),
         "channels": channels,
         "label_of": {name: labels[name] for name in channels},
         "cases": {c.case_key: list(c.supervises or ()) for c in declared},
@@ -430,7 +505,7 @@ def write_fold_assignment(
 # =====================================================================================
 # Phase 1 -- derive
 # =====================================================================================
-def single_channel_view(plans: Mapping[str, Any]) -> dict[str, Any]:
+def single_channel_view(plans: Mapping[str, Any], configuration: str) -> dict[str, Any]:
     """Flatten nnU-Net's per-channel lists for the one key the exporter reads as a scalar.
 
     A DEFECT IN THE PLATFORM'S EXPORTER, REPORTED HERE RATHER THAN WORKED AROUND SILENTLY.
@@ -453,8 +528,8 @@ def single_channel_view(plans: Mapping[str, Any]) -> dict[str, Any]:
     verbatim `plans.json`, because that is the document `MOS-TRAIN-223` retains for audit.
     """
     view = json.loads(json.dumps(dict(plans)))  # a deep copy, by value
-    configuration = dict(view.get("configurations", {}).get(_CONFIGURATION, {}))
-    mask = configuration.get("use_mask_for_norm")
+    entry = dict(view.get("configurations", {}).get(configuration, {}))
+    mask = entry.get("use_mask_for_norm")
     if isinstance(mask, list):
         if len(mask) != 1:
             raise ContractViolation(
@@ -464,8 +539,8 @@ def single_channel_view(plans: Mapping[str, Any]) -> dict[str, Any]:
                 "exact PreprocessingSpec field and the exporter MUST refuse rather than "
                 "take the first channel's value"
             )
-        configuration["use_mask_for_norm"] = bool(mask[0])
-        view["configurations"][_CONFIGURATION] = configuration
+        entry["use_mask_for_norm"] = bool(mask[0])
+        view["configurations"][configuration] = entry
     return view
 
 
@@ -486,7 +561,7 @@ def derive_plan(
         preprocess_dataset,
     )
 
-    from medicalos_preprocessing.autoconfig import export_spec_fields, fingerprint_digest
+    from medos.sdk.autoconfig import export_spec_fields, fingerprint_digest
 
     # `prepare_workspace` already set the three roots and `__main__` called it before
     # this module was imported -- see its docstring for why the order is load-bearing.
@@ -501,7 +576,26 @@ def derive_plan(
     # staged into the same nnU-Net dataset because nnU-Net's fold assignment addresses
     # cases by name within one dataset -- and the fingerprint is extracted BEFORE they are
     # staged, so no statistic is read from them. The ordering is the control; see below.
-    stage_dataset(run, fit_cases, raw_root=raw, spec_document=spec_document)
+    # THE DATASET DIRECTORY IS REBUILT, NOT ADDED TO. A `work/` that survived a failed
+    # attempt still holds the select cases this phase stages at the END, and staging the
+    # fit partition on top of them leaves 90 case files under a `dataset.json` that says
+    # 70. nnU-Net's integrity check catches that count and refuses -- which is how it was
+    # found -- but the count is not the danger. Had the two happened to agree, the
+    # fingerprint would have been extracted over the leftover select cases as well, and
+    # `MOS-TRAIN-135`'s "derived from the FIT partition" would have been false with
+    # nothing to show for it. The ordering below is called the control; a directory that
+    # outlives the phase defeats it, so the phase owns the directory.
+    #
+    # Only hard links are removed. The images themselves are the run directory's, staged
+    # by the platform, and are not touched.
+    shutil.rmtree(raw / DATASET_NAME, ignore_errors=True)
+    # The supervision MODE is frozen with the plan, like everything else phase 1 decides.
+    # `MOS-TRAIN-135`'s argument applies to it directly: a fit that could choose between
+    # masked and unmasked at its own start would make the control arm and the treatment
+    # arm indistinguishable after the fact.
+    unmasked = request.empty_segment_is_negative
+    stage_dataset(run, fit_cases, raw_root=raw, spec_document=spec_document,
+                  empty_segment_is_negative=unmasked)
 
     # `verify_dataset_integrity=True`: a geometry mismatch between an image and its label
     # is a silent loss of supervision, and nnU-Net's checker is the one already written.
@@ -512,36 +606,80 @@ def derive_plan(
         [DATASET_ID], check_dataset_integrity=True, clean=True,
         num_processes=_processes(), verbose=False,
     )
+    # СНЯТО ОДИН РАЗ И ЗАПИСАНО. Два вызова `_vram_target()` вернули бы два разных
+    # числа на общей карте, и в плане оказалось бы не то, чем планировали.
+    vram = vram_observation()
+    # WHICH ARCHITECTURE, DECIDED FROM THE NUMBER ABOVE AND RECORDED.
+    #
+    # nnU-Net's own route gives a 30 GB card `nnUNetPlans` -- the 8 GB baseline -- and you
+    # reach its better residual-encoder presets only by typing `-pl nnUNetPlannerResEncL`.
+    # A pipeline that configures itself should not have a hand-typed flag as the only road
+    # to the configuration upstream recommends. `architectures.select` applies a stated rule
+    # to the observed budget; see that module on why this is derivation and not a
+    # `ConfigurationSearch` (`MOS-TRAIN-213`: no scores, no trained artifacts).
+    preset, architecture = architectures.select(float(vram["budget_gb"]))
     plan_identifier = plan_experiments(
-        [DATASET_ID], gpu_memory_target_in_gb=_vram_target()
+        [DATASET_ID],
+        experiment_planner_class_name=preset.planner,
+        gpu_memory_target_in_gb=float(vram["budget_gb"]),
     )
+    # THE CHOICE IS VERIFIED, NOT TRUSTED. `plan_experiments` resolves the planner by NAME
+    # through a package walk, so a renamed or duplicated class upstream would run something
+    # else and return its identifier. The identifier is the one thing that names which
+    # planner actually ran, and the fit loads the plans file by it.
+    if plan_identifier != preset.plans_identifier:
+        raise ContractViolation(
+            f"architecture preset {preset.name!r} names planner {preset.planner!r}, which "
+            f"should write {preset.plans_identifier!r}; the planner that ran wrote "
+            f"{plan_identifier!r}. MOS-TRAIN-135 freezes the plan at run start and the "
+            "record has to name the architecture that was actually planned"
+        )
 
     # Only now are the select cases visible to nnU-Net, and only as cases to validate
     # against. Nothing between this line and the end of the function reads a statistic.
-    stage_dataset(run, select_cases, raw_root=raw, spec_document=spec_document)
+    # LINKS the select cases; DESCRIBES the whole cohort. `dataset.json` now says 90 and
+    # `supervision.json` carries every case the fit will see. See `stage_dataset`.
+    stage_dataset(
+        run, select_cases, raw_root=raw, spec_document=spec_document,
+        manifest=(*fit_cases, *select_cases), empty_segment_is_negative=unmasked,
+    )
+    # THE PLANS DOCUMENT IS READ BEFORE PREPROCESSING, so the configuration can be REFUSED before
+    # 170 GB is written for it. The planner has already written the file by this point, and
+    # `default_preprocessor.py` does not rewrite it -- checked, not assumed -- so reading it here
+    # and again below is two parses of one small file and cannot change behaviour.
+    plans_path = preprocessed / DATASET_NAME / f"{plan_identifier}.json"
+    if not plans_path.is_file():  # pragma: no cover - the planner always writes it
+        raise ContractViolation(f"the planner wrote no {plans_path}")
+    configuration_name = _configuration(
+        request, json.loads(plans_path.read_text(encoding="utf-8")))
+
     preprocess_dataset(
         DATASET_ID, plans_identifier=plan_identifier,
-        configurations=[_CONFIGURATION], num_processes=[_processes()],
+        configurations=[configuration_name], num_processes=[_processes()],
     )
     write_fold_assignment(preprocessed / DATASET_NAME, fit_cases, select_cases)
 
-    plans_path = preprocessed / DATASET_NAME / f"{plan_identifier}.json"
-    if not plans_path.is_file():  # pragma: no cover - nnU-Net always writes it
-        raise ContractViolation(f"the planner wrote no {plans_path}")
     plans = json.loads(plans_path.read_text(encoding="utf-8"))
 
     # The digest is over the VERBATIM document (MOS-TRAIN-223 retains this one for audit);
     # the export reads the single-channel view. See `single_channel_view`.
     digest = fingerprint_digest(plans)
-    exported = export_spec_fields(single_channel_view(plans), backend="nnunet")
+    exported = export_spec_fields(
+        single_channel_view(plans, configuration_name), backend="nnunet")
 
     run.write("fingerprint", plans)
-    configuration = plans["configurations"][_CONFIGURATION]
+    configuration = plans["configurations"][configuration_name]
     return {
         "backend": {"kind": "nnunet", "version": request.backend_version},
         "plans_identifier": plan_identifier,
-        "configuration": _CONFIGURATION,
+        "configuration": configuration_name,
+        # The preset, the alternatives and the rule. "Why this architecture" is the first
+        # question at a review, and `plans_identifier` alone answers only the last third.
+        "architecture": architecture,
         "fingerprint_digest": digest,
+        # MOS-TRAIN-135: what phase 1 decided, and on what evidence. A fit that OOMs is
+        # then attributable to a number somebody can read rather than to a guess.
+        "vram": vram,
         "fingerprint_document": run.path("fingerprint").name,
         "spec_fields": exported["spec_fields"],
         # MOS-TRAIN-224: the derived TRAINING batch size, which is not a
@@ -556,24 +694,69 @@ def derive_plan(
     }
 
 
-def _vram_target() -> float:
-    """The planner's VRAM budget, in GB. Observed, not assumed.
+#: The margin left below the observable budget, in GB: the allocator's fragmentation, the
+#: CUDA context, and cuDNN's workspace all live outside the planner's estimate.
+_VRAM_MARGIN_GB: Final[float] = 2.0
+#: The floor. A budget below this produces a patch so small that the 3d_fullres
+#: configuration stops being one; refusing is better than planning a token run.
+_VRAM_FLOOR_GB: Final[float] = 4.0
 
-    nnU-Net's default target is 8 GB. Passing the device's actual size lets the planner
-    choose a patch size that fits the card the run will execute on, which is the whole
-    point of auto-configuration -- and passing MORE than the card has produces a plan that
-    OOMs in epoch 1 after the fingerprint has already been frozen.
+
+def vram_observation() -> dict[str, Any]:
+    """What the card actually has FREE, and what budget follows -- as a record.
+
+    THE DEFECT THIS REPLACES, AND WHAT IT COST. This read `total_memory` and returned
+    `total - 2`. On a card nobody else is using that is right. On a SHARED card it is not:
+    the margin was taken from the whole card rather than from what was available, so a
+    32.6 GB card with 2.2 GB already held by someone else's process yielded a 30.6 GB
+    budget -- and the planner then sized a patch for memory that did not exist. Measured
+    on this deployment: free was 30.3 GB against a 30.6 GB budget, and the fit would have
+    died in epoch 1 with the fingerprint already frozen. It was caught by looking at
+    `nvidia-smi` before launching, not by any check here.
+
+    IT IS STILL A SNAPSHOT, AND THAT IS WHY IT IS RECORDED. `mem_get_info` answers for
+    this instant. The fit it plans for starts later -- in the run that found this, hours
+    later -- and the neighbours will have changed. No reading here can fix that; what it
+    can do is write down what was assumed, so a fit that OOMs has a readable cause
+    instead of an argument about whose process grew. The whole observation goes into
+    `plan.json`.
+
+    `MEDOS_TRAINER_VRAM_GB` overrides the arithmetic, and the override is recorded as
+    such: a deployment sharing a card with latency-sensitive work has a reason to take
+    less than is free, and that reason should not be indistinguishable from a measurement.
     """
     import torch
 
     if not torch.cuda.is_available():
-        return 8.0
-    total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        return {"source": "no_cuda", "budget_gb": 8.0}
+
+    free_bytes, total_bytes = torch.cuda.mem_get_info(0)
+    free = free_bytes / (1024 ** 3)
+    total = total_bytes / (1024 ** 3)
+    observed = {
+        "source": "observed",
+        "free_gb": round(free, 1),
+        "total_gb": round(total, 1),
+        "held_by_others_gb": round(total - free, 1),
+        "margin_gb": _VRAM_MARGIN_GB,
+        "budget_gb": max(_VRAM_FLOOR_GB, round(free - _VRAM_MARGIN_GB, 1)),
+    }
+
     override = os.environ.get("MEDOS_TRAINER_VRAM_GB", "").strip()
     if override:
-        return float(override)
-    # Leave a margin for the allocator, the CUDA context and cuDNN's workspace.
-    return max(4.0, round(total - 2.0, 1))
+        asked = float(override)
+        observed["source"] = "override"
+        observed["budget_gb"] = asked
+        # NOT AN ERROR, AND NOT SILENT EITHER. Asking for more than is free is how a
+        # deployment says "the neighbour will be gone by then"; it may be right. It is
+        # recorded so that an OOM later is attributable.
+        observed["exceeds_free"] = asked > free - _VRAM_MARGIN_GB
+    return observed
+
+
+def _vram_target() -> float:
+    """The budget alone, for the planner call. The record goes through `vram_observation`."""
+    return float(vram_observation()["budget_gb"])
 
 
 def _processes() -> int:
@@ -629,12 +812,38 @@ def fit(run: RunDirectory, request: RunRequest, plan: Mapping[str, Any]) -> dict
     )
     dataset_json = json.loads((preprocessed / "dataset.json").read_text(encoding="utf-8"))
 
-    budget = _budget(request)
+    # ONE DECLARED OBJECT, validated at construction and recorded whole. This was three
+    # functions with three precedence ladders, two of which had already drifted on what to do
+    # with a value they could not honour -- one clamped it, one refused. See `training.py`.
+    training = _training_configuration(request)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # READ BACK OUT OF THE FROZEN PLAN, which is the whole point of recording it. This was
+    # `_CONFIGURATION`, a module constant, while `derive_plan` wrote a `configuration` member into
+    # `plan.json` that nothing read -- so a plan derived and preprocessed for one configuration was
+    # fit under whatever the constant said, and nothing raised. `MOS-TRAIN-135` freezes the plan at
+    # run start; the configuration is part of that freeze.
+    configuration_name = plan.get("configuration")
+    if not configuration_name:
+        raise ContractViolation(
+            "the frozen plan records no `configuration`, so which of the plans document's "
+            "configurations was preprocessed is unknown. Defaulting here would fit whichever one "
+            "this module's constant happens to name, which is the defect this member exists to "
+            "close"
+        )
+    configuration_name = str(configuration_name)
+    from medos_trainer.plan import Plan, PlanError
+
+    try:
+        Plan.from_document(plans).configuration(configuration_name)
+    except PlanError as exc:
+        raise ContractViolation(
+            f"the frozen plan names configuration {configuration_name!r}: {exc}"
+        ) from exc
 
     trainer = nnUNetTrainerMaskedChannels(
         plans=plans,
-        configuration=_CONFIGURATION,
+        configuration=configuration_name,
         # Fold 0 is the ONE fold `write_fold_assignment` wrote, and its validation half is
         # the select partition. nnU-Net's `"all"` is never used: it would make nnU-Net
         # choose validation cases out of the fit partition by hashing their names.
@@ -642,10 +851,26 @@ def fit(run: RunDirectory, request: RunRequest, plan: Mapping[str, Any]) -> dict
         dataset_json=dataset_json,
         device=device,
     )
-    trainer.num_epochs = int(budget["max_epochs"])
-    trainer.num_iterations_per_epoch = int(budget["iterations_per_epoch"])
-    trainer.num_val_iterations_per_epoch = int(budget["validation_iterations_per_epoch"])
-    trainer.save_every = max(1, int(budget["max_epochs"]))
+    trainer.num_epochs = training.max_epochs
+    trainer.num_iterations_per_epoch = training.iterations_per_epoch
+    trainer.num_val_iterations_per_epoch = training.validation_iterations_per_epoch
+    trainer.save_every = training.save_every
+    # BEFORE `initialize()`, because `_build_loss` runs inside it. Set after construction for the
+    # reason the attributes' own comment gives: the trainer's signature is transcribed from
+    # nnU-Net's so a mismatch is a TypeError at the call site, and a setting travels in one
+    # visible line instead of through a constructor that must then diverge from the base class.
+    trainer._focal_gamma = training.focal_gamma
+    trainer._focal_alpha = training.focal_alpha
+    # Same seam, same reason: `configure_optimizers` builds the scheduler inside
+    # `initialize()`, so the choice has to be on the instance before that call.
+    trainer._lr_scheduler_kind = training.lr_scheduler
+    # BEFORE `initialize()` TOO, though for a different reason than the loss: nnU-Net builds its
+    # optimiser and its `PolyLRScheduler` in `configure_optimizers()`, which `initialize()` calls,
+    # and the scheduler captures `initial_lr` by value. Setting it afterwards would leave the
+    # optimiser on nnU-Net's rate while `self.initial_lr` reported ours -- the log would name a
+    # rate the fit never used.
+    if training.initial_lr is not None:
+        trainer.initial_lr = training.initial_lr
 
     started = time.monotonic()
     # See `apply_determinism`: this is the one point at which
@@ -664,12 +889,23 @@ def fit(run: RunDirectory, request: RunRequest, plan: Mapping[str, Any]) -> dict
             f"the fit finished and wrote no {checkpoint}; there is nothing to export"
         )
     return {
-        "budget": budget,
+        # MERGED INTO `budget` AND NOT A SEPARATE MEMBER, deliberately. `__main__._fit` records
+        # `fitted.budget` under `hyperparameters` and nowhere else, so a loss setting kept beside
+        # it would be a setting no record carries -- and `_budget`'s own docstring already frames
+        # this dictionary as "what this deployment is asking for", of which the schedule and the
+        # shape of the loss are both. Adding a `FitResult` member instead would put the same
+        # numbers through `port.py` and `__main__.py` to reach the same line of the same file.
+        # THE WHOLE CONFIGURATION, INCLUDING THE SETTINGS AT THEIR DEFAULT, and where each one
+        # came from. `__main__._fit` writes `fitted.budget` into `hyperparameters` and reads nothing
+        # else for it, so the member keeps its name; what changed is that it is one object's own
+        # document instead of two dictionaries merged at this line.
+        "budget": training.as_document(),
         "seconds": round(seconds, 1),
         "device": str(device),
         "output_folder": str(trainer.output_folder),
         "checkpoint": str(checkpoint),
-        "patch_size": [int(n) for n in plans["configurations"][_CONFIGURATION]["patch_size"]],
+        "patch_size": [
+            int(n) for n in plans["configurations"][configuration_name]["patch_size"]],
         # Deep supervision OFF before the network leaves this function. nnU-Net's own
         # method is used rather than reaching into the decoder, because the trainer is
         # what knows whether the module is compiled and whether the heads are wrapped.
@@ -678,36 +914,107 @@ def fit(run: RunDirectory, request: RunRequest, plan: Mapping[str, Any]) -> dict
         # position, which is how a network comes to be served at the wrong scale with
         # every structural check passing.
         "network": _without_deep_supervision(trainer),
-        "label_manager_classes": int(trainer.label_manager.num_segmentation_heads),
+        # `classes`, not `label_manager_classes`: `LabelManager` is an nnU-Net class,
+        # and a port whose vocabulary names one implementation's internals makes the
+        # next backend invent an nnU-Net concept to fill the field. See `port.py`.
+        "classes": int(trainer.label_manager.num_segmentation_heads),
     }
 
+
+
+def _training_configuration(request: RunRequest) -> TrainingConfiguration:
+    """`TrainingConfiguration.from_request`, with its refusal translated at the contract boundary.
+
+    `training.py` IS PURE and raises `TrainingConfigurationError`, which is the right type for a
+    module that must stay importable without the run-directory contract. This backend is on the other
+    side of that boundary: a refusal here has to arrive as a `ContractViolation`, because that is
+    what `__main__._phase` records into `result.json` as the reason a run stopped. Letting the pure
+    type escape would make a run fail with an exception the record has no shape for -- which is what
+    the conformance suite caught the moment the ladder moved.
+    """
+    try:
+        return TrainingConfiguration.from_request(request)
+    except TrainingConfigurationError as exc:
+        raise ContractViolation(str(exc)) from exc
 
 def _budget(request: RunRequest) -> dict[str, int]:
-    """How much training this deployment is asking for, from its own configuration.
+    """The schedule, from `TrainingConfiguration`. Kept as a name for callers that want only this.
 
-    nnU-Net's own defaults are 1000 epochs of 250 iterations, which is the full run. They
-    are the defaults HERE too -- a deployment that sets nothing gets the real thing -- and
-    `MEDOS_TRAINER_EPOCHS` is how a short run is asked for deliberately. Recorded either
-    way: a truncated fit whose record does not say it was truncated is a candidate that
-    reads at the approval gate as a full one.
+    A DELEGATION AND NOT A SECOND LADDER. It used to carry its own copy of the
+    request-then-environment-then-default rule, and that copy CLAMPED a non-positive epoch count to
+    1 with `max(1, ...)` while `_initial_lr`'s copy REFUSED a rate out of range -- two answers to one
+    question in one module. The ladder now lives once, in `training.SETTINGS`, and this refuses too:
+    the stricter of the two behaviours and the correct one, because a clamped value trains a run
+    nobody asked for and the record then names the request rather than what happened.
+    """
+    configured = _training_configuration(request)
+    return {
+        "max_epochs": configured.max_epochs,
+        "iterations_per_epoch": configured.iterations_per_epoch,
+        "validation_iterations_per_epoch": configured.validation_iterations_per_epoch,
+    }
+
+
+
+def _configuration(request: RunRequest, plans: Mapping[str, Any] | None = None) -> str:
+    """Which nnU-Net configuration this run trains, refusing one the plan does not carry.
+
+    THE ROUTES ARE `_budget`'S: the request's own `budget` block first, the deployment's
+    environment second, `3d_fullres` third. The configuration is not a budget, but `RunRequest` has
+    no member for it and adding one changes the run-request contract -- so it travels the same way
+    the epoch count and the learning rate do, and like them it is RECORDED.
+
+    WHY THE REFUSAL NEEDS THE PLANS DOCUMENT. `2d`, `3d_lowres`, `3d_fullres` and
+    `3d_cascade_fullres` are what the planner writes, but `save_plans` merges arbitrary user-named
+    configurations from a pre-existing file, so the set is open and cannot be an enum. The only
+    honest check is against the document in hand, and `plan.Plan.configuration` is what performs
+    it -- including the case that matters here, a CASCADE STUB, which carries two keys and no
+    geometry of its own and would fail deep inside preprocessing rather than at this line.
     """
     declared = dict(request.budget)
+    name = declared.get("configuration")
+    if name is None:
+        name = os.environ.get("MEDOS_TRAINER_CONFIGURATION", "").strip() or None
+    chosen = str(name) if name else _DEFAULT_CONFIGURATION
 
-    def _read(name: str, variable: str, default: int) -> int:
-        if name in declared:
-            return max(1, int(declared[name]))
-        raw = os.environ.get(variable, "").strip()
-        return max(1, int(raw)) if raw else default
+    if plans is not None:
+        from medos_trainer.plan import Plan, PlanError
 
-    return {
-        "max_epochs": _read("max_epochs", "MEDOS_TRAINER_EPOCHS", 1000),
-        "iterations_per_epoch": _read(
-            "iterations_per_epoch", "MEDOS_TRAINER_ITERATIONS", 250
-        ),
-        "validation_iterations_per_epoch": _read(
-            "validation_iterations_per_epoch", "MEDOS_TRAINER_VAL_ITERATIONS", 50
-        ),
-    }
+        try:
+            entry = Plan.from_document(plans).configuration(chosen)
+        except PlanError as exc:
+            raise ContractViolation(str(exc)) from exc
+        if entry.is_cascade_stub:
+            raise ContractViolation(
+                f"configuration {chosen!r} is a cascade STUB carrying only {sorted(entry.body)}: "
+                "it has no patch, no spacing and no architecture of its own, and the cascade's "
+                "low-resolution stage has to be fit and predicted before it can be. Train "
+                f"{entry.inherits_from!r} instead, or implement the cascade"
+            )
+    return chosen
+
+
+def _focal_settings(request: RunRequest) -> dict[str, Any]:
+    """The pointwise term's shaping, from `TrainingConfiguration`. See `_budget` for why it delegates.
+
+    The reason it exists at all is worth keeping: `masked.py` carried a focal term with six gates
+    over it and `_build_loss` passed neither parameter, so every fit ever run used plain BCE and no
+    run COULD have asked for anything else.
+    """
+    configured = _training_configuration(request)
+    return {"focal_gamma": configured.focal_gamma, "focal_alpha": configured.focal_alpha}
+
+
+
+def _initial_lr(request: RunRequest) -> float | None:
+    """The initial learning rate, or `None` for the backend's own. See `_budget` for the delegation.
+
+    `None` MEANS DO NOT TOUCH IT, not 1e-2: a run that asks for nothing must get exactly the schedule
+    every run already on disk was trained under, including if upstream changes it. The measured reason
+    a deployment would ask: `MedOSSegResNetDS` at 356.2M parameters gives NaN from epoch 0 at
+    nnU-Net's 1e-2, diverges at 1e-3 near epoch 40, and trains at 1e-4.
+    """
+    return _training_configuration(request).initial_lr
 
 
 def _without_deep_supervision(trainer: Any) -> Any:

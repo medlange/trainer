@@ -240,7 +240,7 @@ def _load_spec_document(reference: str) -> dict[str, Any]:
     """`module:callable` or a path to a JSON document. Never a guess.
 
     The `module:callable` form exists so a deployment can name the spec the platform
-    itself ships -- `medicalos_preprocessing.fixtures:selftest_spec_document` -- and get the exact
+    itself ships -- `medos.sdk.fixtures:selftest_spec_document` -- and get the exact
     document `MOS-IMG-054`'s self-test executes, rather than a copy of it that has drifted.
     """
     if ":" in reference and not Path(reference).exists():
@@ -271,7 +271,7 @@ def preprocessing_bindings(path: str | os.PathLike[str] | None = None) -> dict[s
     digests everything else with -- so a spec that was edited produces a different digest
     on the next declaration instead of a stale one that matches nothing.
     """
-    from medicalos_preprocessing.canonical import canonical_bytes, sha256_hex
+    from medos.sdk.canonical import canonical_bytes, sha256_hex
 
     source = Path(path or os.environ.get("MEDOS_TRAINER_BINDINGS", "")
                   or DEFAULT_BINDINGS_PATH)

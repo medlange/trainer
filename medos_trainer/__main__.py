@@ -43,12 +43,18 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from medicalos_preprocessing.contract import (
+from medos.sdk.contract import (
+    RUN_DIRECTORY,
     ContractViolation,
     RunDirectory,
     failure_document,
     success_document,
 )
+# SAFE AT MODULE SCOPE, and that is a property of `port.py` rather than a convenience: it
+# imports no torch, no nnU-Net and no backend, so importing it cannot pull `nnunetv2` and
+# bind the three roots `nnunetv2/paths.py` reads at import time. Every other trainer import
+# in this file is deliberately inside a function for exactly that reason.
+from medos_trainer import port
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 
@@ -62,7 +68,7 @@ def _logging() -> None:
 
 
 def _refusals_of(exc: BaseException) -> list[dict[str, Any]]:
-    """`medicalos_preprocessing.errors.Refusal`s, as documents, when the failure was one.
+    """`medos.sdk.errors.Refusal`s, as documents, when the failure was one.
 
     The console renders the engine's refusal vocabulary already (`MOS-API-112` pins the
     wire form). A refusal raised inside the trainer is the same kind of fact as one raised
@@ -79,20 +85,111 @@ def _refusals_of(exc: BaseException) -> list[dict[str, Any]]:
     return out
 
 
+def _produced_by() -> dict[str, Any]:
+    """The build stamp, for the result document. WHICH SOFTWARE WROTE THIS.
+
+    THE DEFECT THIS CLOSES COST AN AFTERNOON. A source tree was fixed and the OLD image
+    was run -- twice -- and both times it was noticed only by a side effect: the results
+    folder was named after the trainer class that should no longer have been constructed.
+    The image knows its own commit, its own dirty flag and its own inventory digest and
+    has since `stamp.py` was written; nothing wrote them into the artifact, so "what
+    trained this" had to be inferred from a directory name instead of read.
+
+    RECORDED, NOT ASSERTED -- the same reading `MOS-TRAIN-126` applies to the binding. A
+    stamp that cannot be read is reported as an error in place of the values, exactly as
+    `doctor` reports it, and never silently omitted: a missing key and a key that says
+    "this ran outside an image" are different facts and only one of them is alarming.
+    """
+    from medos_trainer.stamp import read_stamp
+
+    try:
+        stamp = read_stamp()
+    except (FileNotFoundError, ValueError) as exc:
+        return {"error": str(exc)}
+    # `image_inventory` is the per-file listing the digest is taken over -- thousands of
+    # entries. The digest is the identifier; the listing is how it was computed, and it
+    # stays in the image where `doctor` can print it.
+    return {k: v for k, v in stamp.items() if k != "image_inventory"}
+
+
+def _write_result(run: RunDirectory, document: dict[str, Any]) -> None:
+    """The phase's record: to `result.json` AND to a file only this phase writes.
+
+    ONE WRITER, so the stamp cannot be forgotten. Three call sites write a result -- two
+    successes and the failure path -- and a member added to two of three is a provenance
+    record that is absent exactly when a run went wrong, which is when it is read.
+
+    AND TWO DESTINATIONS, BECAUSE ONE WAS LOSING HALF THE RECORD. Both phases wrote
+    `result.json`; the fit overwrote the plan's. So after a completed run the question
+    "which image derived this plan" had no answer in the run directory -- the same
+    question `produced_by` was added to stop inferring from a directory name. It came up
+    for real when the plans had to be re-derived after an nnU-Net bump.
+
+    `result.json` keeps its meaning: the latest phase, which is what the executor polls
+    and what `medos.training.runs` reads. `result-<phase>.json` is the history. A phase
+    that is neither `plan` nor `fit` writes only `result.json` rather than inventing a
+    member name -- the run directory is a closed set of paths, and a file nobody declared
+    is a file nobody reads.
+    """
+    stamped = {**document, "produced_by": _produced_by()}
+    run.write("result", stamped)
+    role = f"result_{document.get('phase')}"
+    if role in RUN_DIRECTORY:
+        run.write(role, stamped)
+
+
+def _parse_bound_spec(run: RunDirectory) -> None:
+    """`preprocessing.json` through the platform's own parser, before a GPU is taken.
+
+    Raises whatever `parse_spec` raises, unwrapped. The parser's refusal already names
+    the field and the requirement behind it, and `_refusals_of` renders it into
+    `result.json` in the vocabulary `MOS-API-112` pins; a second sentence from here would
+    be a second vocabulary for one fact.
+
+    The import is local because `medos.sdk.spec` pulls the platform package, and
+    `contract.py` -- which this module leans on for everything else -- deliberately does
+    not. Keeping the dependency inside the one function that needs it is what lets the
+    run-directory contract stay pure Python over one directory.
+    """
+    from medos.sdk.spec import parse_spec
+
+    parse_spec(run.spec_document())
+
+
 def _phase(phase: str, run_dir: str) -> int:
     """Run one phase, and write `result.json` whatever happens."""
     run = RunDirectory(run_dir)
     try:
         request = run.request()
-        if request.backend_kind != "nnunet":
-            raise ContractViolation(
-                f"this image trains {'nnunet'!r} and the run binds "
-                f"{request.backend_kind!r}. MOS-REL-037 forbids a compatibility range on "
-                "a recorded version and the same argument applies to a backend: an image "
-                "that pretended to be a second backend would record a version for a "
-                "planner that did not run"
-            )
-        from medos_trainer import backend as nnunet
+        # THE PORT DECIDES WHICH DRIVER RUNS, and it is the only thing that does. This was
+        # a bare `!= "nnunet"` against a string literal, with no test tying it to
+        # `medos_trainer.BACKEND_KIND` -- so the declaration the image makes about itself
+        # and the refusal it enforces could disagree, and the refusal could not name what
+        # the image does implement.
+        try:
+            backend = port.resolve(request.backend_kind)
+        except LookupError as exc:
+            raise ContractViolation(str(exc)) from exc
+
+        # THE SPEC IS PARSED HERE, WHERE REFUSING IT IS FREE.
+        #
+        # `preprocessing.json` is the deployment's registered `PreprocessingSpec` -- the
+        # template `packaging.derive_spec_document` merges the derived fields into. Until
+        # this call existed the FIRST thing to parse it was that merge, which runs after
+        # the fit: a template missing `backend`, `inverse` or `golden_fixture` was
+        # refused at the END of a run, having already spent the preprocessing and every
+        # epoch. That is not hypothetical -- a run reached "Training done." and died on
+        # `KeyError: 'backend'`, and the answer had been sitting in the run directory
+        # since before the first volume was read.
+        #
+        # WHAT IT DOES NOT PROVE, SAID PLAINLY. `plan["spec_fields"]` overwrites the
+        # spacing, the patch and the normalisation, and `derive_spec_document` rewrites
+        # `backend` and `golden_fixture` wholesale. So this parse is WEAKER than the one
+        # at the end and does not replace it. It proves the part that is the
+        # deployment's own -- `io`, `inverse`, the geometry, the label set -- which no
+        # derivation supplies and which therefore cannot become valid later.
+        _parse_bound_spec(run)
+
 
         # BEFORE anything imports `nnunetv2`. `nnunetv2/paths.py` reads its three roots
         # from the environment AT MODULE IMPORT and binds them to constants, so setting
@@ -102,13 +199,13 @@ def _phase(phase: str, run_dir: str) -> int:
         # site early enough -- and why it is a separate function with a docstring rather
         # than three `os.environ` lines somewhere in the middle of the backend.
         work = run.root / "work"
-        nnunet.prepare_workspace(work)
-        determinism = nnunet.apply_determinism(request)
+        backend.prepare_workspace(work)
+        determinism = backend.apply_determinism(request)
 
         if phase == "plan":
-            plan = nnunet.derive_plan(run, request, work=work)
+            plan = backend.derive_plan(run, request, work=work)
             run.write("plan", plan)
-            run.write("result", success_document(
+            _write_result(run, success_document(
                 "plan",
                 fingerprint_digest=plan["fingerprint_digest"],
                 plan_digest=plan["fingerprint_digest"],
@@ -129,9 +226,22 @@ def _phase(phase: str, run_dir: str) -> int:
                 "code path that can produce one"
             )
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
-        return _fit(run, request, plan, determinism, nnunet)
+        # WHICH BACKEND FROZE THIS PLAN. `plan.json` has always recorded it and nothing has
+        # ever read it back. In a one-backend image that is merely unused; with a second
+        # one it is the difference between fitting against your own frozen plan and
+        # fitting against somebody else's, with every structural check passing --
+        # MOS-TRAIN-225's invisible re-derivation arriving through a different door.
+        froze = str(dict(plan.get("backend") or {}).get("kind", ""))
+        if froze != request.backend_kind:
+            raise ContractViolation(
+                f"{plan_path.name} was frozen by backend {froze!r} and this run binds "
+                f"{request.backend_kind!r}. MOS-TRAIN-135 freezes the plan at run start so "
+                "that the fit cannot re-derive one; a plan another backend derived is a "
+                "re-derivation that already happened, elsewhere"
+            )
+        return _fit(run, request, plan, determinism, backend)
     except BaseException as exc:  # noqa: BLE001 - every exit records a reason
-        run.write("result", failure_document(
+        _write_result(run, failure_document(
             phase,
             reason=f"{type(exc).__name__}: {exc}",
             refusals=_refusals_of(exc),
@@ -142,19 +252,21 @@ def _phase(phase: str, run_dir: str) -> int:
 
 def _fit(
     run: RunDirectory, request: Any, plan: dict[str, Any], determinism: dict[str, Any],
-    nnunet: Any,
+    backend: Any,
 ) -> int:
     from medos_trainer import packaging
 
-    fitted = nnunet.fit(run, request, plan)
+    # TYPED AT THE BOUNDARY, not indexed seven times below. An absent member used to raise
+    # `KeyError` here -- after the whole fit had been paid for -- one member at a time.
+    fitted = port.FitResult.from_mapping(backend.fit(run, request, plan))
 
     spec_document = packaging.derive_spec_document(
         run.spec_document(), plan, code_commit=_code_commit()
     )
     weights = packaging.torchscript_bytes(
-        fitted["network"], patch=fitted["patch_size"], channels=1
+        fitted.network, patch=fitted.patch_size, channels=1
     )
-    checkpoint = Path(fitted["checkpoint"]).read_bytes()
+    checkpoint = fitted.checkpoint.read_bytes()
 
     import numpy as np
     import torch
@@ -164,13 +276,22 @@ def _fit(
         spec_document=spec_document,
         weights=weights,
         checkpoint=checkpoint,
-        patch=fitted["patch_size"],
+        patch=fitted.patch_size,
         channels=1,
-        classes=int(fitted["label_manager_classes"]),
+        classes=fitted.classes,
         versions={"torch": str(torch.__version__), "numpy": str(np.__version__)},
     )
+    modelcard_path = packaging.write_modelcard(
+        run.root,
+        spec_document=spec_document,
+        bundle_dir=run.path("bundle").name,
+        weights_file=report.weights_path,
+        weights_digest=report.weights_digest,
+        versions={"torch": str(torch.__version__), "numpy": str(np.__version__)},
+        stamp=_produced_by(),
+    )
 
-    run.write("result", success_document(
+    _write_result(run, success_document(
         "fit",
         bundle={
             "path": run.path("bundle").name,
@@ -180,6 +301,7 @@ def _fit(
             "weights_digest": report.weights_digest,
             "file_count": len(report.files),
         },
+        modelcard={"path": modelcard_path.name, "format": "medlange.modelcard/1"},
         preprocessing_spec={
             "id": spec_document["id"],
             "version": spec_document["version"],
@@ -191,12 +313,12 @@ def _fit(
         # `TrainingRun.hyperparameters` and that column is sealed at submit on this
         # deployment; see trainer/README.md. Recorded here so it is recorded
         # somewhere a reviewer reads rather than nowhere.
-        hyperparameters={**dict(plan["hyperparameters"]), **dict(fitted["budget"])},
+        hyperparameters={**dict(plan["hyperparameters"]), **dict(fitted.budget)},
         training={
-            "seconds": fitted["seconds"],
-            "device": fitted["device"],
-            "epochs": fitted["budget"]["max_epochs"],
-            "iterations_per_epoch": fitted["budget"]["iterations_per_epoch"],
+            "seconds": fitted.seconds,
+            "device": fitted.device,
+            "epochs": fitted.budget["max_epochs"],
+            "iterations_per_epoch": fitted.budget["iterations_per_epoch"],
         },
         determinism=determinism,
     ))
@@ -204,7 +326,7 @@ def _fit(
 
 
 def _canonical_digest(document: dict[str, Any]) -> str:
-    from medicalos_preprocessing.canonical import canonical_bytes, sha256_hex
+    from medos.sdk.canonical import canonical_bytes, sha256_hex
 
     return "sha256:" + sha256_hex(canonical_bytes(document))
 
