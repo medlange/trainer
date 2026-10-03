@@ -325,6 +325,62 @@ def torchscript_bytes(network: Any, *, patch: list[int], channels: int) -> bytes
     return buffer.getvalue()
 
 
+def onnx_bytes(
+    network: Any, *, patch: list[int], channels: int, opset: int = 17
+) -> bytes:
+    """The trained network as ONNX — the SERVED artifact, not the TorchScript bundle.
+
+    WHY A SECOND FORMAT. The bundle's `model.ts` is the MONAI-bundle deliverable
+    (`MOS-TRAIN-129`); the normative serving path is a portable ONNX graph on the shared
+    Triton (`docs/spec/15-delivery.md` §15.2.4, CPU mode), because `MOS-OPS-071` forbids
+    the server from performing a backend conversion and an ONNX graph is the artifact a
+    conversion-free server loads. ConversionRun (MOS-TRAIN-159–169) owns the formal
+    equivalence evidence; this function is the packaging half that produces the bytes.
+
+    THE SAME GUARDS AS `torchscript_bytes`, for the same reasons: the dynamo wrapper is
+    unwrapped, deep supervision is off (the served artifact returns ONE tensor at input
+    resolution, not the training-time list), and the export is checked to return one
+    output. The batch dimension is declared dynamic (`dynamic_axes`), which is what lets
+    the Triton config declare the leading `-1` of MOS-OPS-072 and `allowed_patch_batch_sizes`
+    be a capacity knob under MOS-OPS-078.
+    """
+    import torch
+
+    module = getattr(network, "_orig_mod", network)
+    decoder = getattr(module, "decoder", None)
+    if decoder is not None and hasattr(decoder, "deep_supervision"):
+        decoder.deep_supervision = False
+    module = module.eval()
+
+    # A FROZEN TorchScript artifact (what ships in the bundle) has its weights inlined
+    # as constants and yields NO parameters; that is not an error, it is what freezing
+    # means. Training-time networks still give us their device.
+    params = list(module.parameters())
+    device = params[0].device if params else torch.device("cpu")
+    example = torch.zeros((1, channels, *patch), dtype=torch.float32, device=device)
+    buffer = io.BytesIO()
+    with torch.no_grad():
+        torch.onnx.export(
+            module,
+            example,
+            buffer,
+            input_names=["input"],
+            output_names=["output"],
+            opset_version=opset,
+            dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
+        )
+    buffer.seek(0)
+    import onnx  # tooling dependency, like `medos/tools/publish_model.py`
+
+    model = onnx.load_model_from_string(buffer.getvalue())
+    if len(model.graph.output) != 1:
+        raise ContractViolation(
+            f"the exported ONNX graph returns {len(model.graph.output)} outputs and not "
+            "one; deep supervision is still on and the served artifact would be a tuple"
+        )
+    return buffer.getvalue()
+
+
 def write_candidate_bundle(
     root: str | Path,
     *,
@@ -401,6 +457,8 @@ def write_modelcard(
     weights_digest: str,
     versions: Mapping[str, str],
     stamp: Mapping[str, Any],
+    onnx_file: str | None = None,
+    onnx_digest: str | None = None,
 ) -> Path:
     """Write `medlange.modelcard/1` next to the bundle: the SDK-readable declaration.
 
@@ -419,16 +477,26 @@ def write_modelcard(
 
     spec = parse_spec(dict(spec_document))
     label_set = list((dict(spec_document).get("io") or {}).get("label_set") or [])
+    # THE SERVED ARTIFACT, BY NAME AND DIGEST. `weights` is the card's open mapping: the
+    # TorchScript bundle fields are the bundle deliverable, and when the packaging step
+    # also produced the ONNX serving artifact (the normative Triton path) the card names
+    # it too, next to the card in the run directory. A consumer that only knows the
+    # bundle ignores the extra keys; `medos.tools.deploy_model` is the consumer that
+    # requires them.
+    weights: dict[str, Any] = {
+        "path": bundle_dir,
+        "weights_file": weights_file,
+        "format": _WEIGHTS_FORMAT,
+        "digest": weights_digest,
+    }
+    if onnx_file is not None:
+        weights["onnx_file"] = onnx_file
+        weights["onnx_digest"] = onnx_digest
     document = document_for(
         model_id=spec.model_id,
         model_version=spec.model_version,
         spec_document=spec_document,
-        weights={
-            "path": bundle_dir,
-            "weights_file": weights_file,
-            "format": _WEIGHTS_FORMAT,
-            "digest": weights_digest,
-        },
+        weights=weights,
         frameworks={
             "monai_bundle": MONAI_BUNDLE_TARGET,
             "torch": str(versions["torch"]),

@@ -266,6 +266,15 @@ def _fit(
     weights = packaging.torchscript_bytes(
         fitted.network, patch=fitted.patch_size, channels=1
     )
+    # THE SERVED ARTIFACT, beside the card: ONNX for the normative Triton path
+    # (MOS-OPS-071 forbids server-side conversion; ConversionRun owns the equivalence
+    # evidence). Export needs the `onnx` tooling package, like `medos/tools` — a training
+    # environment without it still gets the bundle and the TorchScript card.
+    onnx_blob: bytes | None = None
+    try:
+        onnx_blob = packaging.onnx_bytes(fitted.network, patch=fitted.patch_size, channels=1)
+    except ImportError as exc:  # pragma: no cover - depends on the ambient env
+        print(f"onnx export skipped ({exc}); the card will name the bundle only")
     checkpoint = fitted.checkpoint.read_bytes()
 
     import numpy as np
@@ -281,6 +290,8 @@ def _fit(
         classes=fitted.classes,
         versions={"torch": str(torch.__version__), "numpy": str(np.__version__)},
     )
+    import hashlib
+
     modelcard_path = packaging.write_modelcard(
         run.root,
         spec_document=spec_document,
@@ -289,7 +300,13 @@ def _fit(
         weights_digest=report.weights_digest,
         versions={"torch": str(torch.__version__), "numpy": str(np.__version__)},
         stamp=_produced_by(),
+        onnx_file="model.onnx" if onnx_blob is not None else None,
+        onnx_digest=(
+            "sha256:" + hashlib.sha256(onnx_blob).hexdigest() if onnx_blob is not None else None
+        ),
     )
+    if onnx_blob is not None:
+        (Path(run.root) / "model.onnx").write_bytes(onnx_blob)
 
     _write_result(run, success_document(
         "fit",
