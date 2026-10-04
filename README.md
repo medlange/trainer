@@ -2,9 +2,9 @@
 
 **`medos-trainer` — the image that actually touches the pixels.**
 
-Part of the [Medlange](../README.md) umbrella: Medlange Trainer fits models in the
+Part of the [Medlange](https://github.com/medlange) umbrella: Medlange Trainer fits models in the
 lineage of nnU-Net and MONAI and writes the medlange.modelcard/1 card that
-[Medlange Core](../medos/medos/sdk/README.md) reads to rebuild each model's
+[Medlange Core](https://github.com/medlange/core/blob/main/medos/medos/sdk/README.md) reads to rebuild each model's
 preprocessing pipeline.
 
 This directory is a **second deployable**. `medos/medos` — the API, the worker, the
@@ -41,7 +41,7 @@ platform.
 **The rule for this directory: a test here may read `trainer/` and nothing else.** What
 the PLATFORM asserts about this image — that the exchange contract agrees on both sides,
 that the serving image never imports torch, that the trainer's reach into `medos.` stays
-inside a declared allow-list — lives in `../tests/`, because those are facts about two
+inside a declared allow-list — lives in [`https://github.com/medlange/core/tree/main/tests`](https://github.com/medlange/core/tree/main/tests), because those are facts about two
 things rather than about this one. The direction is one-way: the platform may read the
 trainer, the trainer may not read the platform.
 
@@ -70,11 +70,11 @@ boundary and `LocalProcessOrchestrator` starts the fit as a CHILD PROCESS of thi
 rather than through an orchestrator API, which chapter 15 forbids from application code.
 So the supervisor runs here and lives there, and those were always two questions.
 
-`../tests/unit/test_trainer_import_boundary.py` holds the line. Its allow-list is written
+`https://github.com/medlange/core/blob/main/tests/unit/test_trainer_import_boundary.py` holds the line. Its allow-list is written
 to SHRINK — an entry nobody imports any more is a failure there, not a formality — and it
 has gone 10 → 4 → 3 by failing on exactly that clause each time.
 
-Register entry 110 of `../docs/spec/99-known-inconsistencies.md` records the measurement.
+Register entry 110 of `https://github.com/medlange/core/blob/main/docs/spec/99-known-inconsistencies.md` records the measurement.
 
 ---
 
