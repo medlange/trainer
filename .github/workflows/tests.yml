@@ -10,6 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: medlange/core
+          path: core
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -19,4 +23,9 @@ jobs:
       - run: grep -v '^torch' requirements.txt > /tmp/req.txt && pip install -r /tmp/req.txt
       - run: pip install pytest ruff
       - run: ruff check medos_trainer tools || true
-      - run: pytest tests -q
+      - name: pytest tests -q
+        run: pytest tests -q
+        env:
+          # The trainer reads the SDK (medos.*) from a sibling checkout of
+          # medlange/core -- the same relative shape the monorepo has.
+          PYTHONPATH: ${{ github.workspace }}/core/medos
