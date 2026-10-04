@@ -1,0 +1,22 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # CPU torch first (the requirements pin is the CUDA build, several GB);
+      # the rest of the pins follow. The suite is 430+ tests and runs on CPU.
+      - run: pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+      - run: grep -v '^torch' requirements.txt > /tmp/req.txt && pip install -r /tmp/req.txt
+      - run: pip install pytest ruff
+      - run: ruff check medos_trainer tools || true
+      - run: pytest tests -q
