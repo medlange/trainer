@@ -47,11 +47,8 @@ class UNetConfig:
     def __post_init__(self) -> None:
         if len(self.features) < 2:
             raise ValueError("a UNet needs at least two stages")
-        if any(f <= 0 or f % 8 for f in self.features):
-            raise ValueError(
-                "feature widths must be positive multiples of 8,"
-                f" got {self.features}"
-            )
+        if any(f <= 0 for f in self.features):
+            raise ValueError(f"feature widths must be positive, got {self.features}")
         if any(s not in (1, 2) for s in self.stem_stride):
             raise ValueError(f"stem strides are 1 or 2 per axis, got {self.stem_stride}")
 

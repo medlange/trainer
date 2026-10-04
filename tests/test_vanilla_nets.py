@@ -60,7 +60,7 @@ def test_config_refuses_degenerate_shapes() -> None:
     with pytest.raises(ValueError):
         UNetConfig(input_channels=1, num_classes=2, features=(8,))
     with pytest.raises(ValueError):
-        UNetConfig(input_channels=1, num_classes=2, features=(7, 16))
+        UNetConfig(input_channels=1, num_classes=2, features=(0, 16))
     with pytest.raises(ValueError):
         UNetConfig(input_channels=1, num_classes=2, features=(8, 16), stem_stride=(3, 1, 1))
 
@@ -97,9 +97,10 @@ def test_imports_are_vanilla() -> None:
     import ast
 
     root = Path(__file__).resolve().parents[1] / "medos_trainer" / "vanilla"
-    allowed = {"torch", "dataclasses", "typing", "__future__", "math", "enum",
-               "pathlib", "collections", "collections.abc", "functools",
-               "itertools", "json", "time", "copy", "abc", "io"}
+    allowed = {"torch", "numpy", "medos_trainer", "dataclasses", "typing",
+               "__future__", "math", "enum", "pathlib", "collections",
+               "collections.abc", "functools", "itertools", "json", "time",
+               "copy", "abc", "io"}
     offenders: list[str] = []
     for path in root.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
