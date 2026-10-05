@@ -21,7 +21,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
 from medos_trainer.vanilla.data import Case, PatchSampler, augment_mirror_rotate, make_batch
 from medos_trainer.vanilla.losses import MaskedSegmentationLoss
 from medos_trainer.vanilla.nets import VanillaUNet

@@ -171,7 +171,6 @@ def overlap_for_case(
     should not pay for them.
     """
     import numpy as np
-
     from medos_trainer.detection import label_value_of
 
     marked = set(supervised)

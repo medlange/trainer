@@ -59,7 +59,6 @@ def _predict(args: argparse.Namespace) -> int:
     case `.npz`, one output `.npz`.
     """
     import numpy as np
-
     from medos_trainer.vanilla.data import load_case_npz
     from medos_trainer.vanilla.infer import load_predictor
 

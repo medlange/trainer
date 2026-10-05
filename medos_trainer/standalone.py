@@ -28,7 +28,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-
 from medos_trainer.vanilla.data import Case, load_case_npz
 from medos_trainer.vanilla.plan import PlannedRun, collect_fingerprint, plan_from_fingerprint
 
@@ -121,7 +120,6 @@ def fit_command(
 ) -> dict:
     """The whole autonomous pipeline: data -> fingerprint -> plan -> fit -> bundle."""
     import torch
-
     from medos_trainer.vanilla.nets import build_unet
     from medos_trainer.vanilla.trainer import VanillaTrainer
 
