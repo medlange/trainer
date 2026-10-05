@@ -3,19 +3,24 @@
 
 WHY THIS EXISTS BESIDE `detection.py`
 --------------------------------------
-Eight of this cohort's ten channels were being measured by detection, and for six of them that is
+Eight of this cohort's ten channels were being measured by detection, and for six of them
+that is
 the wrong endpoint. What the published precedent actually asks for, per finding:
 
-  * the aorta and the pulmonary trunk -- SEGMENTATION OVERLAP plus a diameter tolerance. The only
+  * the aorta and the pulmonary trunk -- SEGMENTATION OVERLAP plus a diameter tolerance. The
+    only
     cleared chest-CT precedent for an aortic claim is Dice 0.924 +/- 0.046 on 315 cases, with
     diameter bias within +/-1.5 mm and MAE <= 2.2 mm at nine landmarks (Siemens K222360). Our
-    lesion-level "sensitivity 1.000" on those channels measures only whether the single component
+    lesion-level "sensitivity 1.000" on those channels measures only whether the single
+    component
     was found, which is trivially true for a single structure and says nothing about whether the
     boundary between arch and ascending is in the right place;
-  * the pleural effusion -- a VOLUME in mL, or a three-level grade. No source anywhere counts
+  * the pleural effusion -- a VOLUME in mL, or a three-level grade. No source anywhere
+    counts
     effusion per connected component, and on this cohort the reference for one effusion is split
     into 5 to 84 pieces, so a per-component sensitivity measures the label's connectivity;
-  * the lung lobes, as the nearest accepted CT segmentation claim, were cleared at Dice 0.95-0.98,
+  * the lung lobes, as the nearest accepted CT segmentation claim, were cleared at Dice
+    0.95-0.98,
     mean surface distance 0.5-1.0 mm, HD95 2.6-5.2 mm and volume error 1.5-3.5% on >4,500 CTs
     (Siemens K183271) -- which is the shape of claim this module produces.
 
@@ -41,8 +46,9 @@ Spec: MOS-EVID-047, MOS-EVID-048, MOS-EVID-054, MOS-EVID-107.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, Iterable, Mapping, Sequence
+from typing import Any, Final
 
 __all__ = ["CaseOverlap", "OVERLAP_METRICS", "overlap_for_case", "surface_distances"]
 
@@ -91,10 +97,12 @@ def surface_distances(
     """Distances in millimetres from each surface to the other, both directions.
 
     THE SURFACE IS THE BOUNDARY AND NOT THE MASK. A distance transform over the whole mask would
-    measure from every interior voxel too, which drags a Hausdorff percentile toward zero for a
+    measure from every interior voxel too, which drags a Hausdorff percentile toward zero
+    for a
     thick structure and toward the mask's radius for a thin one -- in both cases reporting
-    something that is not a boundary agreement. The boundary is the set of foreground voxels with
-    at least one background face neighbour, under the same 6-connectivity the detection counting
+    something that is not a boundary agreement. The boundary is the set of
+    foreground voxels with at least one background face neighbour, under the same
+    6-connectivity the detection counting
     uses.
 
     `scipy.ndimage.distance_transform_edt` takes the voxel spacing, so the result is already in
@@ -109,14 +117,15 @@ def surface_distances(
     # An integer label map passed here does not fail: `mask & ~eroded` stays integer, and
     # `distances[integer_array]` is then FANCY INDEXING by those integers instead of boolean
     # masking. The result has the wrong shape and wrong contents, and the first sign of it is a
-    # concatenate complaining about dimensions somewhere else entirely -- which is how this guard
+    # concatenate complaining about dimensions somewhere else entirely -- which is how this
+    # guard
     # came to be written. A caller holding a label map wants `labels == value`, and only the
     # caller knows which value.
     for name, mask in (("predicted", predicted), ("reference", reference)):
         if np.asarray(mask).dtype != bool:
             raise ValueError(
-                f"{name} has dtype {np.asarray(mask).dtype}, and a surface distance needs a "
-                "boolean mask. An integer label map indexes as positions rather than as a mask, "
+                f"{name} has dtype {np.asarray(mask).dtype}, and a surface "
+                "distance needs a boolean mask. An integer label map indexes as positions "
                 "which produces a wrongly shaped array of wrong numbers instead of an error"
             )
 
@@ -223,11 +232,14 @@ def overlap_for_case(
             forward, backward = surface_distances(predicted, reference, spacing_mm=spacing_mm)
             if forward.size and backward.size:
                 # HD95 IS THE MAXIMUM OF THE TWO PERCENTILES, not the percentile of the two
-                # concatenated. The first version concatenated them, and that is not the standard
+                # concatenated. The first version concatenated them, and that is not the
+                # standard
                 # definition and is not conservative: a percentile over the union is weighted by
                 # how many surface voxels each side has, so a prediction that misses a whole
-                # region -- whose reference surface is then large and mostly far away -- can score
-                # BETTER than a one-directional figure, which is the opposite of what a Hausdorff
+                # region -- whose reference surface is then large and mostly far away -- can
+                # score
+                # BETTER than a one-directional figure, which is the opposite of what a
+                # Hausdorff
                 # percentile is for. Caught by a test written against the symmetry property.
                 hd95 = float(max(np.percentile(forward, 95), np.percentile(backward, 95)))
                 # ASSD is the mean over all surface points of both directions, which IS the

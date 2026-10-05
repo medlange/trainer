@@ -1,18 +1,17 @@
 # Build context for trainer/Dockerfile. The context is the repository root
-# because the image installs the `medos` package from it; everything that is not that
-# package, the trainer, or `pyproject.toml` is excluded, so a rebuild is not invalidated
-# by a test run or a downloaded fixture.
+# because that is where `trainer/build.sh` points the build; everything that
+# is not the trainer is excluded, so a rebuild is not invalidated by a test
+# run or a downloaded fixture elsewhere in the tree.
 #
-# `.git` IS EXCLUDED ON PURPOSE. The commit reaches the image as a build argument that
-# `trainer/build.sh` reads from git on the host, never as a repository the image
-# could re-interrogate. An image that can run `git rev-parse` is an image that can report
-# a commit for a tree it was not built from.
+# `.git` IS EXCLUDED ON PURPOSE. The commit reaches the image as a build
+# argument that `trainer/build.sh` reads from git on the host, never as a
+# repository the image could re-interrogate. An image that can run
+# `git rev-parse` is an image that can report a commit for a tree it was not
+# built from.
 *
-!medos/medos/
-!pyproject.toml
 !trainer/
 
-# ...and inside those, the things that are never part of the image.
+# ...and inside that, the things that are never part of the image.
 **/__pycache__/
 **/*.pyc
 **/*.pyo
@@ -20,8 +19,8 @@
 **/.ruff_cache/
 trainer/build.sh
 trainer/README.md
-# The trainer's own suite moved here from `tests/` when the tree did. It is not in the
-# image -- the Dockerfile copies `medos_trainer/` and the bindings file by name, never the
-# directory -- but it IS in the build context, and this file's whole purpose is that
-# editing a test does not invalidate a layer.
+# The trainer's own suite lives beside the code it reads. It is not in the
+# image -- the Dockerfile copies `medos_trainer/` by name, never the
+# directory -- but it IS in the build context, and this file's whole purpose
+# is that editing a test does not invalidate a layer.
 trainer/tests/

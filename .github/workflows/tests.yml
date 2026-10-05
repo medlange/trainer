@@ -10,27 +10,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: medlange/core
-          path: core
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       # CPU torch first (the requirements pin is the CUDA build, several GB);
-      # the rest of the pins follow. The suite is 430+ tests and runs on CPU.
+      # the rest of the pins follow. The suite is 120+ tests and runs on CPU.
       - run: pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
       - run: grep -v '^torch' requirements.txt > /tmp/req.txt && pip install -r /tmp/req.txt
-      # monai's resolver may pull a newer torch over the pin -- put the pin back.
-      - run: pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu --force-reinstall
       - run: pip install pytest ruff
-      - run: ruff check medos_trainer tools || true
-      - name: pytest tests -q
-        # The version-pin gate asserts the INSTALLED stack equals the image's
-        # CUDA pins; CI deliberately runs the CPU wheel, so that one gate is
-        # the image build's job (Dockerfile) and skips here.
-        run: pytest tests -q -k "not test_the_installed_versions_are_the_pins"
-        env:
-          # The trainer reads the SDK (medos.*) from a sibling checkout of
-          # medlange/core -- the same relative shape the monorepo has.
-          PYTHONPATH: ${{ github.workspace }}/core/medos
+      # The tree is vanilla-only: no nnU-Net, no MONAI, no medos.sdk import.
+      # Ruff is strict here, not advisory.
+      - run: ruff check medos_trainer tests
+      - run: pytest tests -q

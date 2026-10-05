@@ -30,9 +30,9 @@ from medos_trainer import evidence  # noqa: E402
 
 
 def _conventions(**over):
-    base = dict(metric_registry_version=1, dice_aggregation="dice_mean_per_case",
-                fp_volume_threshold_ml=0.5, bootstrap_seed=20260926,
-                min_candidate_volume_ml=0.02)
+    base = {"metric_registry_version": 1, "dice_aggregation": "dice_mean_per_case",
+            "fp_volume_threshold_ml": 0.5, "bootstrap_seed": 20260926,
+            "min_candidate_volume_ml": 0.02}
     base.update(over)
     return evidence.conventions(**base)
 
@@ -76,8 +76,9 @@ def test_the_five_empty_reference_ids_are_all_registered() -> None:
 
 
 def test_exactly_the_four_threshold_needing_ids_need_a_threshold() -> None:
-    """`MOS-EVID-055` names four. A fifth would let a number be persisted without the operating
-    point that produced it; a missing one would demand a threshold for a metric that has none."""
+    """`MOS-EVID-055` names four. A fifth would let a number be persisted without the
+    operating point that produced it; a missing one would demand a threshold for a
+    metric that has none."""
     needs = {k for k, v in evidence.REGISTRY.items() if v["needs_threshold"] is True}
     assert needs == {"sensitivity", "specificity", "ppv", "froc_sensitivity"}
 
@@ -257,7 +258,7 @@ def test_resampling_patients_gives_a_wider_interval_than_resampling_cases() -> N
         # schemes at all.
         for series in range(per_patient):
             values.append(mean + (series - per_patient / 2) * 0.002)
-            patients.append("p%d" % index)
+            patients.append(f"p{index}")
     rows = _rows(values, patients=patients)
     clustered = evidence.aggregate("dice_mean_per_case", rows,
                                    conventions_block=_conventions())
@@ -395,6 +396,6 @@ def test_an_unregistered_id_is_refused_on_the_counted_path_too() -> None:
                                    conventions_block=_conventions(), operating_point=OP)
 
 
-def test_a_threshold_needing_metric_is_refused_without_an_operating_point_on_both_paths() -> None:
+def test_a_threshold_needing_metric_is_refused_without_an_operating_point_on_both() -> None:
     with pytest.raises(ValueError, match="needs an operating point"):
         evidence.aggregate_counted("ppv", _counts([(1, 2)]), conventions_block=_conventions())

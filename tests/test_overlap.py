@@ -99,9 +99,10 @@ def test_the_volume_error_is_signed_and_the_percentage_is_not() -> None:
 
 
 def test_an_empty_reference_is_ineligible_and_still_reports_what_was_predicted() -> None:
-    """Both halves of `MOS-EVID-051`: it leaves the aggregate, and the volume it predicted anyway
-    is still measured, because that is the false-positive volume the empty-reference metrics are
-    made of. A Dice of 0.0 here would read as a failed segmentation rather than an absent one."""
+    """Both halves of `MOS-EVID-051`: it leaves the aggregate, and the volume it
+    predicted anyway is still measured, because that is the false-positive volume
+    the empty-reference metrics are made of. A Dice of 0.0 here would read as a
+    failed segmentation rather than an absent one."""
     reference = np.zeros((8, 8, 8), dtype=int)
     predicted = np.zeros((8, 8, 8), dtype=bool)
     predicted[0:2, 0:2, 0:2] = True
@@ -128,11 +129,13 @@ def test_the_distance_is_measured_from_the_boundary_and_not_from_the_whole_mask(
     the two.
 
     From the BOUNDARY: the prediction's surface is far from the reference's surface, so every
-    forward distance is large -- 16 mm here -- and that is the honest reading of a prediction that
+    forward distance is large -- 16 mm here -- and that is the honest reading of a prediction
+    that
     covers a fraction of the structure.
 
     From the WHOLE MASK: the nearest reference VOXEL is the prediction's own voxel, so every
-    forward distance is 0 and a prediction covering 1% of the structure scores a perfect boundary
+    forward distance is 0 and a prediction covering 1% of the structure scores a perfect
+    boundary
     agreement.
 
     An earlier fixture used two overlapping slabs offset by one voxel; there both readings give
@@ -147,8 +150,8 @@ def test_the_distance_is_measured_from_the_boundary_and_not_from_the_whole_mask(
     assert forward.size
     assert forward.min() > 4.0, (
         f"the nearest forward distance is {forward.min():.2f} mm for a prediction sitting deep "
-        "inside the reference, so the distance is being measured to the nearest reference VOXEL "
-        "rather than to its surface"
+        "inside the reference, so the distance is being measured to the nearest reference "
+        "VOXEL rather than to its surface"
     )
 
 
@@ -175,13 +178,14 @@ def test_hd95_is_the_larger_of_the_two_percentiles_and_not_the_percentile_of_bot
       forward (prediction surface to reference surface) is 0 over the shared part and very large
         over the blob, and the blob is about 6% of the prediction's surface.
 
-    Six percent is above the 95th percentile of FORWARD and below the 95th percentile of the two
-    CONCATENATED, because concatenating adds the reference's 376 zero distances and dilutes it. So
-    the correct form reports the blob and the concatenated form hides it -- a spurious structure
-    the width of the chest, reported as sub-millimetre boundary agreement.
+    Six percent is above the 95th percentile of FORWARD and below the 95th percentile
+    of the two CONCATENATED, because concatenating adds the reference's 376 zero
+    distances and dilutes it. So the correct form reports the blob and the concatenated
+    form hides it -- a spurious structure the width of the chest, reported as
+    sub-millimetre boundary agreement.
 
-    The first implementation concatenated. The first fixture could not tell: its far side was both
-    numerous and large, so both forms returned 12.00.
+    The first implementation concatenated. The first fixture could not tell: its far
+    side was both numerous and large, so both forms returned 12.00.
     """
     reference = np.zeros((40, 40, 40), dtype=int)
     reference[2:14, 2:14, 2:6] = 1
@@ -199,8 +203,8 @@ def test_hd95_is_the_larger_of_the_two_percentiles_and_not_the_percentile_of_bot
         f"concatenated {concatenated:.2f}"
     )
     assert row.hd95_mm == pytest.approx(correct), (
-        f"HD95 is {row.hd95_mm:.2f}; the larger of the two percentiles is {correct:.2f} and the "
-        f"percentile of both concatenated is {concatenated:.2f}"
+        f"HD95 is {row.hd95_mm:.2f}; the larger of the two percentiles is {correct:.2f} "
+        f"and the percentile of both concatenated is {concatenated:.2f}"
     )
 
 
@@ -227,8 +231,8 @@ def test_skipping_the_distances_still_gives_the_overlap() -> None:
 # The registry, and what this module does not claim
 # =====================================================================================
 def test_every_metric_this_module_names_is_in_the_registry() -> None:
-    """`MOS-EVID-070` invalidates a run that persists an unregistered id, so a name invented here
-    would invalidate the run it was computed for."""
+    """`MOS-EVID-070` invalidates a run that persists an unregistered id, so a
+    name invented here would invalidate the run it was computed for."""
     from medos_trainer.evidence import REGISTRY
 
     for metric in OVERLAP_METRICS:
@@ -257,9 +261,10 @@ def test_a_shape_mismatch_is_refused_rather_than_broadcast() -> None:
 
 
 def test_an_integer_label_map_passed_as_a_mask_is_refused() -> None:
-    """THE GUARD THAT CAME OUT OF A TEST BUG. An integer array does not fail here: it indexes the
-    distance transform as POSITIONS rather than as a mask, producing a wrongly shaped array of
-    wrong numbers. The first symptom was a concatenate complaining about dimensions in a caller,
+    """THE GUARD THAT CAME OUT OF A TEST BUG. An integer array does not fail here:
+    it indexes the distance transform as POSITIONS rather than as a mask,
+    producing a wrongly shaped array of wrong numbers. The first symptom was a
+    concatenate complaining about dimensions in a caller,
     which points nowhere near the cause."""
     reference = np.zeros((8, 8, 8), dtype=int)
     reference[2:6, 2:6, 2:6] = 1

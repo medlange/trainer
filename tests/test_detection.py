@@ -191,11 +191,12 @@ def test_a_candidate_spanning_two_references_matches_the_one_it_overlaps_most() 
     truth[0, 1, 1] = 1                      # reference A: 1 voxel, component 1
     truth[0, 3:6, 3:6] = 1                  # reference B: 9 voxels, component 2
     probability[0, 0, 1:6, 1:6] = 0.9       # one component covering both
-    # NOT UNIFORM, and this is the correction. With 0.9 everywhere the component's maximum and the
-    # maximum on each reference are the same number, so this fixture could not tell them apart --
-    # and a real defect lived in that gap: the component's 0.93 was recorded against a reference
-    # whose every predicted voxel was 0.2. Reference A is weakened here so the two readings differ,
-    # and the assertion below is per reference rather than "all of them".
+    # NOT UNIFORM, and this is the correction. With 0.9 everywhere the component's
+    # maximum and the maximum on each reference are the same number, so this fixture
+    # could not tell them apart -- and a real defect lived in that gap: the component's
+    # 0.93 was recorded against a reference whose every predicted voxel was 0.2.
+    # Reference A is weakened here so the two readings differ, and the assertion below
+    # is per reference rather than "all of them".
     probability[0, 0, 1, 1] = 0.6           # reference A: predicted, but less strongly
 
     found = _case(probability, truth)
@@ -205,7 +206,7 @@ def test_a_candidate_spanning_two_references_matches_the_one_it_overlaps_most() 
     references = {r.id: r for r in found.references["neo"]}
 
     assert candidate.overlap_voxels == 9, (
-        "the candidate is attributed to the reference it overlaps LEAST: %r" % (candidate,)
+        f"the candidate is attributed to the reference it overlaps LEAST: {candidate!r}"
     )
     assert references[candidate.matched_reference_id].volume_ml == pytest.approx(9 * VOXEL_ML)
     by_volume = sorted(found.references["neo"], key=lambda r: r.volume_ml)
@@ -215,8 +216,9 @@ def test_a_candidate_spanning_two_references_matches_the_one_it_overlaps_most() 
         "undercounted wherever one prediction covers a cluster"
     )
     assert small.matched_scores == pytest.approx((0.6,)), (
-        "the small reference is recorded at the COMPONENT's maximum rather than at this model's "
-        "confidence on its own voxel, which reports a lesion found more strongly than it was"
+        "the small reference is recorded at the COMPONENT's maximum rather than at "
+        "this model's confidence on its own voxel, which reports a lesion found more "
+        "strongly than it was"
     )
 
 
@@ -357,15 +359,16 @@ def _detected(case, *, references=(), candidates=(), channel="neo"):
 def _candidate(score, matched=None, volume_ml=0.1, overlaps=None, overlap_scores=None):
     """A hand-built candidate. `overlaps` defaults to the single attributed reference.
 
-    THE DEFAULT IS THE HONEST ONE: a candidate attributed to `r1` does overlap `r1`. `overlaps`
-    is spelled out only where a candidate covers SEVERAL references, which is the case the
-    bridge got wrong twice.
+    THE DEFAULT IS THE HONEST ONE: a candidate attributed to `r1` does overlap `r1`.
+    `overlaps` is spelled out only where a candidate covers SEVERAL references, which is
+    the case the bridge got wrong twice.
 
-    `overlap_scores` IS THE PER-REFERENCE CONFIDENCE and defaults to this candidate's own `score`
-    against every reference it overlaps -- which is what a UNIFORM component gives, and is the
-    fixture shape that hid a real defect: with one score everywhere, "the component's maximum" and
-    "the maximum on this reference" are the same number, so a test cannot tell them apart. Pass it
-    explicitly wherever that distinction is the point.
+    `overlap_scores` IS THE PER-REFERENCE CONFIDENCE and defaults to this candidate's
+    own `score` against every reference it overlaps -- which is what a UNIFORM component
+    gives, and is the fixture shape that hid a real defect: with one score everywhere,
+    "the component's maximum" and "the maximum on this reference" are the same number,
+    so a test cannot tell them apart. Pass it explicitly wherever that distinction is
+    the point.
     """
     if overlaps is None:
         overlaps = () if matched is None else (matched,)
@@ -589,7 +592,7 @@ def test_one_candidate_covering_two_lesions_finds_both_through_the_bridge() -> N
     rows = counts_at(detections, "neo", threshold=0.5, patient_of=PATIENTS)
     row = rows["sensitivity"][0]
     assert (row.numerator, row.denominator) == (2.0, 2.0), (
-        "a lesion the surviving candidate covered was not counted as found: %r" % (row,)
+        f"a lesion the surviving candidate covered was not counted as found: {row!r}"
     )
     # And it is ONE claim, so precision sees one candidate and not two.
     assert rows["ppv"][0].denominator == 1.0
@@ -628,11 +631,11 @@ def test_the_largest_component_policy_keeps_the_structure_and_not_the_confident_
 
     assert largest["sensitivity"][0].numerator == 1.0, (
         "the policy either kept a candidate it should have discarded, or discarded the one "
-        "covering a lesion: %r" % (largest["sensitivity"][0],)
+        f"covering a lesion: {largest['sensitivity'][0]!r}"
     )
     assert (largest["ppv"][0].numerator, largest["ppv"][0].denominator) == (1.0, 1.0), (
         "the surviving candidate is not the real one, so the policy chose by score rather than "
-        "by volume: %r" % (largest["ppv"][0],)
+        f"by volume: {largest['ppv'][0]!r}"
     )
 
 
@@ -646,24 +649,29 @@ def test_an_unknown_component_policy_is_refused() -> None:
 # A LESION IS FOUND BY THE CONFIDENCE ON ITS OWN VOXELS, not by the component's maximum
 # =====================================================================================
 #
-# THE DEFECT THESE WERE WRITTEN AGAINST, and it survived 36 green tests. `Candidate.score` is the
-# maximum over the whole component extracted at 0.1, and that single number was recorded as the
-# confidence against EVERY reference the component touched. So a reference with no predicted voxel
-# at the operating point was reported found, along two independent paths: `froc_curve` through
-# `matched_scores`, and `counts_at` through the overlap SET with no score consulted at all.
+# THE DEFECT THESE WERE WRITTEN AGAINST, and it survived 36 green tests.
+# `Candidate.score` is the maximum over the whole component extracted at 0.1, and
+# that single number was recorded as the confidence against EVERY reference the
+# component touched. So a reference with no predicted voxel at the operating point
+# was reported found, along two independent paths: `froc_curve` through
+# `matched_scores`, and `counts_at` through the overlap SET with no score consulted
+# at all.
 #
-# WHY NOTHING CAUGHT IT. The fixture that exercised a component spanning two references painted the
-# whole component 0.9, so "the component's maximum" and "the maximum on this reference" were the
-# same number and no assertion could separate them. That fixture is rebuilt below rather than
+# WHY NOTHING CAUGHT IT. The fixture that exercised a component spanning two
+# references painted the whole component 0.9, so "the component's maximum" and "the
+# maximum on this reference" were the same number and no assertion could separate
+# them. That fixture is rebuilt below rather than
 # supplemented: a blind test left in place is a test that will be trusted again.
 
 def _spanning_case(near=0.93, far=0.2, bridge=0.2, extraction=0.1):
-    """ONE component at the extraction threshold, spanning two references of different strength.
+    """ONE component at the extraction threshold, spanning two references of different
+    strength.
 
-    Reference A is a single voxel the model barely predicts; reference B is nine voxels it predicts
-    strongly; a bridge of weak voxels joins them so `scipy.ndimage.label` sees one component. This
-    is the shape of a real pleural effusion, whose reference on this cohort is split into 5 to 84
-    pieces with one predicted sheet across them.
+    Reference A is a single voxel the model barely predicts; reference B is nine
+    voxels it predicts strongly; a bridge of weak voxels joins them so
+    `scipy.ndimage.label` sees one component. This is the shape of a real pleural
+    effusion, whose reference on this cohort is split into 5 to 84 pieces with one
+    predicted sheet across them.
     """
     probability = np.zeros((2, 1, 8, 8))
     truth = np.zeros((1, 8, 8), dtype=int)
@@ -678,9 +686,9 @@ def _spanning_case(near=0.93, far=0.2, bridge=0.2, extraction=0.1):
 def test_the_confidence_recorded_against_a_reference_is_the_one_on_its_own_voxels() -> None:
     """THE DEFECT ITSELF, at the point where the number is written down.
 
-    Reference A's every predicted voxel is 0.2 and reference B's are 0.93. The component maximum is
-    0.93. Recording 0.93 against A -- which is what this did -- says the model found A with 93%
-    confidence when it has no voxel over A above 0.2.
+    Reference A's every predicted voxel is 0.2 and reference B's are 0.93. The
+    component maximum is 0.93. Recording 0.93 against A -- which is what this did --
+    says the model found A with 93% confidence when it has no voxel over A above 0.2.
     """
     found = _spanning_case()
     assert len(found.candidates["neo"]) == 1, "the fixture no longer produces ONE component"
@@ -698,9 +706,10 @@ def test_the_confidence_recorded_against_a_reference_is_the_one_on_its_own_voxel
 def test_a_reference_with_no_voxel_above_the_operating_point_is_not_counted_found() -> None:
     """THE CONSEQUENCE, through `counts_at`, which is the number a report prints.
 
-    At 0.5 the model has predicted nothing at all over reference A, so sensitivity is 1 of 2. The
-    defect reported 2 of 2 -- and it reached that number without consulting any per-reference score,
-    by taking the whole overlap set of a candidate that survived on its OTHER end.
+    At 0.5 the model has predicted nothing at all over reference A, so sensitivity is
+    1 of 2. The defect reported 2 of 2 -- and it reached that number without consulting
+    any per-reference score, by taking the whole overlap set of a candidate that
+    survived on its OTHER end.
 
     At 0.15 both are found, which is the half that shows the gate is about the THRESHOLD and not
     about refusing weak overlaps outright.
@@ -716,18 +725,18 @@ def test_a_reference_with_no_voxel_above_the_operating_point_is_not_counted_foun
 
     at_low = counts_at([found], "neo", threshold=0.15, patient_of={"c1": "p1"})
     assert at_low["sensitivity"][0].numerator == 2.0, (
-        "at 0.15 both lesions ARE predicted, so refusing the weak one here would be the opposite "
-        "error -- undercounting a lesion the model did find"
+        "at 0.15 both lesions ARE predicted, so refusing the weak one here would be the "
+        "opposite error -- undercounting a lesion the model did find"
     )
 
 
 def test_the_froc_curve_cannot_report_a_lesion_found_above_its_own_confidence() -> None:
-    """The curve is built from `matched_scores`, so the same defect made it flat where it should
-    fall.
+    """The curve is built from `matched_scores`, so the same defect made it flat where
+    it should fall.
 
-    With 0.93 recorded against both references the curve reports sensitivity 1.0 at every threshold
-    up to 0.93 -- a spurious plateau, and exactly over the range a clinical operating point would be
-    chosen from.
+    With 0.93 recorded against both references the curve reports sensitivity 1.0 at
+    every threshold up to 0.93 -- a spurious plateau, and exactly over the range a
+    clinical operating point would be chosen from.
     """
     found = _spanning_case()
     curve = froc_curve([found], "neo")
@@ -741,15 +750,17 @@ def test_the_froc_curve_cannot_report_a_lesion_found_above_its_own_confidence() 
 
     # AND THE OTHER END, which is the half that needs the threshold SET to be right.
     #
-    # Proved by breaking: dropping the per-reference scores from the threshold set left the
-    # assertion above green, because it only removes points BELOW 0.5 -- the curve then jumps from
-    # 0.5 straight to nothing and never reports the operating point at which both lesions ARE
-    # found. A FROC curve that cannot express its own best sensitivity understates the model at
-    # every low operating point, and `froc_at` interpolates between the points it has.
+    # Proved by breaking: dropping the per-reference scores from the threshold set left
+    # the assertion above green, because it only removes points BELOW 0.5 -- the curve then
+    # jumps from 0.5 straight to nothing and never reports the operating point at which
+    # both lesions ARE found. A FROC curve that cannot express its own best sensitivity
+    # understates the model at every low operating point, and `froc_at` interpolates
+    # between the points it has.
     thresholds = [point["score_threshold"] for point in curve]
     assert any(t == pytest.approx(0.2) for t in thresholds), (
-        f"the weak lesion's own confidence 0.2 is not a point on the curve: {thresholds}. The "
-        "thresholds are built from the values at which an answer changes, and that is one of them"
+        f"the weak lesion's own confidence 0.2 is not a point on the curve: {thresholds}. "
+        "The thresholds are built from the values at which an answer changes, and that is "
+        "one of them"
     )
     complete = [point for point in curve if point["sensitivity"] >= 1.0 - 1e-9]
     assert complete, (
@@ -762,10 +773,11 @@ def test_the_froc_curve_cannot_report_a_lesion_found_above_its_own_confidence() 
 def test_precision_still_treats_the_whole_component_as_one_detection() -> None:
     """THE OTHER HALF MUST NOT MOVE, and this is the gate that says so.
 
-    A detection is one predicted object with one confidence, and that confidence IS the component's
-    maximum -- which is why `Candidate.score` was right and is unchanged. The fix is only about the
-    found/not-found question. If it had also changed the false-positive side, precision would have
-    started counting a single predicted sheet as several detections.
+    A detection is one predicted object with one confidence, and that confidence IS the
+    component's maximum -- which is why `Candidate.score` was right and is unchanged.
+    The fix is only about the found/not-found question. If it had also changed the
+    false-positive side, precision would have started counting a single predicted sheet
+    as several detections.
     """
     found = _spanning_case()
     at_half = counts_at([found], "neo", threshold=0.5, patient_of={"c1": "p1"})
@@ -780,9 +792,10 @@ def test_precision_still_treats_the_whole_component_as_one_detection() -> None:
 def test_the_overlap_set_is_derived_from_the_scores_so_the_two_cannot_drift() -> None:
     """One source of truth, asserted rather than trusted.
 
-    The overlap SET and the per-reference SCORES describe the same overlaps. Two fields would let a
-    future edit update one and not the other, and the direction that fails silently is the set
-    staying wide while the scores narrow -- which is the defect this whole section is about.
+    The overlap SET and the per-reference SCORES describe the same overlaps. Two fields
+    would let a future edit update one and not the other, and the direction that fails
+    silently is the set staying wide while the scores narrow -- which is the defect this
+    whole section is about.
     """
     found = _spanning_case()
     candidate = found.candidates["neo"][0]

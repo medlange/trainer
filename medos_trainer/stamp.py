@@ -14,7 +14,7 @@ static declaration keeps them true. Two do not, and entry 82 says exactly why:
     trustworthy."
 
 `MOS-TRAIN-126`'s own words are that these are "recorded rather than asserted", and
-`medos.training.runs.RunBinding` carries no defaults for the same reason: "a default is an
+the platform's run binding carries no defaults for the same reason: "a default is an
 assertion wearing a record's clothes". So this module runs ONCE, inside the image, during
 `docker build`, and writes what it OBSERVED to a file the entrypoint reads back. After a
 rebuild the file is different because the image is different. Nobody edits anything.
@@ -78,8 +78,9 @@ __all__ = [
     "read_stamp",
 ]
 
-#: `medos.training.runs._COMMIT_RE`, restated so a bad commit is refused at BUILD rather
-#: than at the first submit. The platform accepts a 40- or 64-hex object name.
+#: The commit pattern the platform's submit path checks against, restated so a bad
+#: commit is refused at BUILD rather than at the first submit. A 40- or 64-hex object
+#: name.
 _COMMIT_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 
 #: What the stamp file carries. Exactly entry 82's two keys, plus the inventory the digest
@@ -101,11 +102,11 @@ _HASHED_TREES: Final[tuple[str, ...]] = (
 def _canonical(document: Mapping[str, Any]) -> bytes:
     """JCS-shaped bytes: sorted keys, no spaces, UTF-8. `MOS-EVID-008`'s form.
 
-    `medos.sdk.canonical.canonical_bytes` is the ONE implementation -- shared by the
-    platform and this image rather than owned by either (`MOS-REL-032`) -- and is what
-    every other digest in this tree goes through. It is not imported here because this
-    module runs during the build with stdlib only; the two agree on the two properties
-    that matter for a digest -- key order and separator -- and
+    The platform's canonical serialiser is the ONE implementation -- shared rather than
+    owned by either side (`MOS-REL-032`) -- and is what every other digest in this tree
+    goes through. It is not imported here because this module runs during the build with
+    stdlib only; the two agree on the two properties that matter for a digest -- key
+    order and separator -- and
     `tests/unit/test_trainer_stamp.py` asserts that agreement against the real one.
     """
     return json.dumps(
@@ -224,7 +225,7 @@ def build_stamp(*, code_commit: str, code_dirty: bool) -> dict[str, Any]:
 
     `code_dirty` is NOT refused here and must not be. `MOS-TRAIN-125` blocks
     `state = SUCCEEDED` for a dirty tree, which is a different statement and belongs to
-    `medos.training.runs.succeed`: "a dirty-tree run is a legitimate experiment and an
+    the platform's succeed path: "a dirty-tree run is a legitimate experiment and an
     illegitimate candidate, and refusing it at submit would push people to commit noise in
     order to run anything." Refusing it at BUILD would be worse still -- it would stop a
     developer building an image to debug with.
@@ -233,8 +234,8 @@ def build_stamp(*, code_commit: str, code_dirty: bool) -> dict[str, Any]:
     if not _COMMIT_RE.match(commit):
         raise ValueError(
             f"code_commit {code_commit!r} is not a git object name. MOS-TRAIN-125 pins "
-            "the commit a run was fitted from and medos.training.runs refuses anything "
-            "that is not 40 or 64 lowercase hex characters; a placeholder here would be "
+            "the commit a run was fitted from and the platform refuses anything that is "
+            "not 40 or 64 lowercase hex characters; a placeholder here would be "
             "recorded in the provenance of every run this image performs"
         )
     digest, inventory = content_digest()

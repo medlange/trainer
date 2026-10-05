@@ -54,8 +54,9 @@ Spec: MOS-EVID-047 to MOS-EVID-060, MOS-EVID-067, MOS-EVID-069, MOS-EVID-070.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, Mapping, Sequence
+from typing import Any, Final
 
 __all__ = [
     "BOOTSTRAP_B",

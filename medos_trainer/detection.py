@@ -54,7 +54,8 @@ precisely on clustered findings, which is where the undercount is largest and le
 
 The convention that any overlap finds is the one detection challenges use, and its risk is the
 mirror image: one blob smeared over a cluster claims every lesion in it. `overlap_voxels` on
-each candidate is what lets a reader see that happening rather than take the count on faith. Overlap rather than
+each candidate is what lets a reader see that happening rather than take the count on
+faith. Overlap rather than
 a centroid-distance tolerance, because these predictions are segmentations: a candidate that
 covers a lesion has found it whatever its centroid does, and a tolerance in millimetres is a
 parameter whose value would have to be defended per finding. `match_distance_mm` is still
@@ -75,8 +76,9 @@ Spec: MOS-EVID-054, MOS-EVID-055, MOS-EVID-056, MOS-EVID-069.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Final, Iterable, Mapping, Sequence
+from typing import Any, Final
 
 __all__ = [
     "FROC_POINTS",
@@ -123,20 +125,25 @@ class Candidate:
     #: REFERENCE'S OWN VOXELS: `(reference_id, max probability within the shared region)`.
     #:
     #: WHY THE SCORE IS PER REFERENCE AND NOT THE COMPONENT'S. `score` above is the maximum over
-    #: the whole component, which is the right number for a DETECTION -- one predicted object, one
+    # : the whole component, which is the right number for a DETECTION -- one predicted object,
+    # one
     #: confidence. It is the wrong number for "was this lesion found", and using it there lets a
     #: reference with NO predicted voxel at the operating point be reported found: one component
-    #: extracted at 0.1 can span a strong lesion at 0.93 and a weak one whose every voxel is 0.2,
+    # : extracted at 0.1 can span a strong lesion at 0.93 and a weak one whose every voxel is
+    # 0.2,
     #: and the component's 0.93 was recorded for both. Reproduced on a four-voxel fixture:
-    #: sensitivity 1.000 at threshold 0.5 beside a Dice, from the same probabilities, showing the
+    # : sensitivity 1.000 at threshold 0.5 beside a Dice, from the same probabilities, showing
+    # the
     #: second lesion entirely unpredicted -- and the FROC curve flat at 1.0 out to 0.93, because
     #: raising the threshold cannot remove a reference whose recorded score sits somewhere else.
     #:
     #: THE SAME MISTAKE, THIRD SPELLING. Attribution was first used for the found/not-found
-    #: question in `candidates_for_case`, then again in `counts_at`; this is the same confusion one
+    # : question in `candidates_for_case`, then again in `counts_at`; this is the same confusion
+    # one
     #: level down -- the right SET of references with the wrong SCORE against each of them.
     #:
-    #: `overlapped_reference_ids` is a property over this field rather than a second field, so the
+    # : `overlapped_reference_ids` is a property over this field rather than a second field, so
+    # the
     #: two cannot drift: there is one place the overlap set is decided.
     overlap_scores: tuple[tuple[str, float], ...] = ()
 
@@ -145,8 +152,8 @@ class Candidate:
         """Every reference this candidate touches at the extraction threshold.
 
         Derived, not stored. A reader asking "which lesions does this claim cover" wants this; a
-        reader asking "was this lesion found at t" wants `overlap_scores` and must compare against
-        t, because covering a lesion at 0.2 is not finding it at 0.5.
+        reader asking "was this lesion found at t" wants `overlap_scores` and must
+        compare against t, because covering a lesion at 0.2 is not finding it at 0.5.
         """
         return tuple(reference_id for reference_id, _score in self.overlap_scores)
 
@@ -283,8 +290,6 @@ def counts_at(
             # the biggest component is the structure. Taking the highest-scoring one instead
             # would keep whichever speck the network was most confident about.
             survivors = [max(survivors, key=lambda c: c.volume_ml)]
-        kept = {id(c) for c in survivors}
-
         if references:
             # A REFERENCE IS FOUND BY A SURVIVING CANDIDATE THAT OVERLAPS IT -- any overlap,
             # from the candidate's full `overlapped_reference_ids` and not from the single
@@ -302,11 +307,13 @@ def counts_at(
             # or sensitivity would be read under one policy and precision under another in one
             # table.
             # AT THIS THRESHOLD, ON THE REFERENCE'S OWN VOXELS. Taking the candidate's whole
-            # overlap set would count a lesion found because something ELSE in the same component
+            # overlap set would count a lesion found because something ELSE in the same
+            # component
             # reached the threshold -- see `Candidate.overlap_scores`. A candidate whose overlap
             # score on a reference clears `threshold` necessarily clears it component-wide too,
             # since the overlap maximum cannot exceed the component maximum, so the survivor
-            # filter above is not weakened by this: it still decides WHICH candidates count, which
+            # filter above is not weakened by this: it still decides WHICH candidates count,
+            # which
             # is what `largest_component` needs.
             found_ids = {
                 reference_id for candidate in survivors
@@ -370,13 +377,17 @@ def froc_curve(detections: Sequence[Any], channel: str) -> list[dict[str, Any]]:
     #
     # A candidate's own `score` changes the false-positive count: raising the threshold past it
     # removes that detection. A candidate's per-reference OVERLAP score changes the sensitivity:
-    # raising the threshold past it stops that lesion counting as found. The two differ whenever a
-    # component is not uniform -- one sheet spanning a strong lesion and a weak one -- and with only
-    # the component scores in the set the curve cannot express the point where the weak lesion drops
+    # raising the threshold past it stops that lesion counting as found. The two differ whenever
+    # a
+    # component is not uniform -- one sheet spanning a strong lesion and a weak one -- and with
+    # only
+    # the component scores in the set the curve cannot express the point where the weak lesion
+    # drops
     # out. It would then report the sensitivity of the strongest threshold below it, which is an
     # understatement at every low operating point and an overstatement at every high one.
     #
-    # 1.0 beyond the highest closes the curve at zero predictions so the interpolation has a left
+    # 1.0 beyond the highest closes the curve at zero predictions so the interpolation has a
+    # left
     # end.
     thresholds = sorted(
         {c.score for c in candidates}
@@ -397,12 +408,14 @@ def froc_curve(detections: Sequence[Any], channel: str) -> list[dict[str, Any]]:
             #
             # A channel every eligible case leaves unannotated has no sensitivity -- there is
             # nothing to be sensitive to. It used to be NaN, and `json.dumps` writes NaN as the
-            # bare token `NaN`, which is NOT valid JSON: a strict parser refuses the WHOLE report,
+            # bare token `NaN`, which is NOT valid JSON: a strict parser refuses the WHOLE
+            # report,
             # not just that field. Found by the clinical-chain smoke test, on the case
             # `MOS-EVID-051` is about -- supervised, empty ground truth -- and reachable on this
             # cohort for a channel as rare as `benign_nodule`.
             #
-            # The false-positive rate stays, because it IS defined: what the model predicted on a
+            # The false-positive rate stays, because it IS defined: what the model predicted on
+            # a
             # case with nothing to find is the whole of the five empty-reference metrics.
             "sensitivity": (float(hits) / total_references) if total_references else None,
             "false_positives_per_case": float(false_positives) / total_cases,
@@ -426,7 +439,8 @@ def froc_at(
         return None
     if any(row["sensitivity"] is None for row in curve):
         # NOTHING TO INTERPOLATE. A curve whose sensitivity is undefined belongs to a channel no
-        # eligible case annotates; interpolating across it would invent a number, and arithmetic on
+        # eligible case annotates; interpolating across it would invent a number, and arithmetic
+        # on
         # `None` would raise here instead of saying so.
         return None
     ordered = sorted(curve, key=lambda row: row["false_positives_per_case"])
@@ -439,13 +453,15 @@ def froc_at(
         if rate == target:
             # Several thresholds can share a rate; the most sensitive one is the operating point
             # a deployment would pick at that rate.
-            same = [r["sensitivity"] for r in ordered if r["false_positives_per_case"] == target]
+            same = [r["sensitivity"] for r in ordered
+                    if r["false_positives_per_case"] == target]
             return float(max(same))
         if rate > target:
             if previous is None:
                 return float(row["sensitivity"]) if target >= 0 else None
             span = rate - previous["false_positives_per_case"]
-            weight = 0.0 if span == 0 else (target - previous["false_positives_per_case"]) / span
+            weight = (0.0 if span == 0
+                      else (target - previous["false_positives_per_case"]) / span)
             return float(previous["sensitivity"]
                          + weight * (row["sensitivity"] - previous["sensitivity"]))
         previous = row
@@ -557,7 +573,8 @@ def candidates_for_case(
         )
     if scores.shape[1:] != truth_map.shape:
         raise ValueError(
-            f"prediction {scores.shape[1:]} and reference {truth_map.shape} differ in shape, so "
+            f"prediction {scores.shape[1:]} and reference {truth_map.shape} differ in "
+            "shape, so "
             "an overlap between them would be an accident of broadcasting"
         )
     if len(spacing_mm) != truth_map.ndim:
@@ -590,7 +607,7 @@ def candidates_for_case(
             centroid = np.asarray([float(c) for c in np.argwhere(where).mean(axis=0)])
             reference_centroids[index] = centroid
             reference_rows.append(Reference(
-                id="%s_%s_%d" % (case or "case", channel, index),
+                id=f"{case or 'case'}_{channel}_{index}",
                 volume_ml=float(np.count_nonzero(where)) * per_voxel_ml,
                 centroid_voxel=tuple(centroid),
             ))
@@ -631,11 +648,14 @@ def candidates_for_case(
                 # undercount would have been both largest and least visible.
                 touched = [int(i) for i in np.nonzero(overlaps)[0]]
                 # THE CONFIDENCE ON EACH REFERENCE'S OWN VOXELS, not the component's maximum.
-                # `where & (truth_labels == r)` is the shared region, which is non-empty for every
+                # `where & (truth_labels == r)` is the shared region, which is non-empty for
+                # every
                 # member of `touched` by construction, so the max is always defined.
                 #
-                # The inner loop variable is NOT `index`: the outer loop's `index` is the COMPONENT
-                # label, and shadowing it here made two different things share one name in eleven
+                # The inner loop variable is NOT `index`: the outer loop's `index` is the
+                # COMPONENT
+                # label, and shadowing it here made two different things share one name in
+                # eleven
                 # lines of code that turns on exactly that distinction.
                 overlap_scores: list[tuple[str, float]] = []
                 for reference_index in touched:
