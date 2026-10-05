@@ -595,6 +595,35 @@ def build_parser() -> argparse.ArgumentParser:
     predict_parser.add_argument("--overlap", type=float, default=0.5)
     predict_parser.add_argument("--batch-size", type=int, default=2)
     predict_parser.add_argument("--device", default="cpu")
+
+    vanilla_plan = sub.add_parser(
+        "vanilla-plan",
+        help="vanilla stack: fingerprint a cases directory and write the derived plan",
+    )
+    vanilla_plan.add_argument("--data", required=True, help="directory of .npz cases")
+    vanilla_plan.add_argument("--preset", default="cpu")
+    vanilla_plan.add_argument("--out", required=True, help="plan JSON path")
+
+    vanilla_fit = sub.add_parser(
+        "vanilla-fit",
+        help="vanilla stack: plan and train over a cases directory, no platform",
+    )
+    vanilla_fit.add_argument("--data", required=True, help="directory of .npz cases")
+    vanilla_fit.add_argument("--preset", default="cpu")
+    vanilla_fit.add_argument("--out", required=True, help="bundle directory")
+    vanilla_fit.add_argument("--epochs", type=int, default=None,
+                           help="override the plan's epochs (smoke runs)")
+    vanilla_fit.add_argument("--steps-per-epoch", type=int, default=None)
+    vanilla_fit.add_argument("--seed", type=int, default=0)
+    vanilla_fit.add_argument("--device", default="cpu")
+
+    vanilla_import = sub.add_parser(
+        "vanilla-import-nnunet",
+        help="vanilla stack: convert an nnU-Net NIfTI layout to .npz cases",
+    )
+    vanilla_import.add_argument("--images", required=True, help="imagesTr/ directory")
+    vanilla_import.add_argument("--labels", required=True, help="labelsTr/ directory")
+    vanilla_import.add_argument("--out", required=True, help="output .npz directory")
     return parser
 
 
@@ -609,6 +638,28 @@ def main(argv: list[str] | None = None) -> int:
         return _execute(args)
     if args.command == "predict":
         return _predict(args)
+    if args.command == "vanilla-plan":
+        from medos_trainer.standalone import plan_command
+
+        plan_command(args.data, args.preset, args.out)
+        print(f"wrote {args.out}")
+        return 0
+    if args.command == "vanilla-fit":
+        from medos_trainer.standalone import fit_command
+
+        summary = fit_command(
+            args.data, args.preset, args.out,
+            epochs=args.epochs, steps_per_epoch=args.steps_per_epoch,
+            seed=args.seed, device=args.device,
+        )
+        print(json.dumps(summary, indent=2))
+        return 0
+    if args.command == "vanilla-import-nnunet":
+        from medos_trainer.standalone import import_nnunet_dataset
+
+        n = import_nnunet_dataset(args.images, args.labels, args.out)
+        print(f"converted {n} cases into {args.out}")
+        return 0
     return _doctor()
 
 
