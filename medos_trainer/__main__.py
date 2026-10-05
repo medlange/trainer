@@ -50,6 +50,7 @@ from medos.sdk.contract import (
     failure_document,
     success_document,
 )
+
 # SAFE AT MODULE SCOPE, and that is a property of `port.py` rather than a convenience: it
 # imports no torch, no nnU-Net and no backend, so importing it cannot pull `nnunetv2` and
 # bind the three roots `nnunetv2/paths.py` reads at import time. Every other trainer import
@@ -348,6 +349,32 @@ def _canonical_digest(document: dict[str, Any]) -> str:
     return "sha256:" + sha256_hex(canonical_bytes(document))
 
 
+def _predict(args: argparse.Namespace) -> int:
+    """The vanilla stack's standalone inference: bundle in, prediction out.
+
+    EXISTS BECAUSE THE AUDIT NAMED ITS ABSENCE: a trainer a stranger cannot
+    run a trained model with is a component, not a framework. No platform,
+    no run directory, no database -- a checkpoint directory from `fit`, one
+    case `.npz`, one output `.npz`.
+    """
+    import numpy as np
+
+    from medos_trainer.vanilla.data import load_case_npz
+    from medos_trainer.vanilla.infer import load_predictor
+
+    case = load_case_npz(args.input)
+    predictor = load_predictor(
+        args.checkpoint_dir, overlap=args.overlap,
+        batch_size=args.batch_size, device=args.device,
+    )
+    label, probabilities = predictor.predict(case.image)
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(out, label=label, probabilities=probabilities)
+    print(f"wrote {out} label={label.shape} probabilities={probabilities.shape}")
+    return 0
+
+
 def _code_commit() -> str:
     from medos_trainer.stamp import read_stamp
 
@@ -400,11 +427,11 @@ def _doctor() -> int:
 def _execute(args: argparse.Namespace) -> int:
     """The supervisor. Reads the deployment's own configuration and drives one run."""
     import psycopg
+    from medos.training.orchestrator import LocalProcessOrchestrator
+    from medos.training.supervisor import execute_pending, execute_run
     from psycopg.rows import dict_row
 
-    from medos.training.orchestrator import LocalProcessOrchestrator
     from medos_trainer.environment import declare, preprocessing_bindings
-    from medos.training.supervisor import execute_pending, execute_run
 
     dsn = os.environ.get("MEDOS_DATABASE_URL", "")
     if not dsn:
@@ -553,6 +580,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("doctor", help="what this image can and cannot do right now")
+
+    predict_parser = sub.add_parser(
+        "predict",
+        help="vanilla stack: run a saved bundle over one case (sliding window)",
+    )
+    predict_parser.add_argument(
+        "--checkpoint-dir", required=True,
+        help="directory save_inference_bundle wrote (model.pt, net_config.json, "
+             "fit_plan.json)",
+    )
+    predict_parser.add_argument("--input", required=True, help="case .npz (image)")
+    predict_parser.add_argument("--output", required=True, help="output .npz")
+    predict_parser.add_argument("--overlap", type=float, default=0.5)
+    predict_parser.add_argument("--batch-size", type=int, default=2)
+    predict_parser.add_argument("--device", default="cpu")
     return parser
 
 
@@ -565,6 +607,8 @@ def main(argv: list[str] | None = None) -> int:
         return _declare_environment(args.out, args.bindings, args.allow_cpu)
     if args.command == "execute":
         return _execute(args)
+    if args.command == "predict":
+        return _predict(args)
     return _doctor()
 
 

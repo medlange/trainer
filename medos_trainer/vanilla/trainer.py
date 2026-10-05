@@ -16,7 +16,6 @@ receives a generator and uses it.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -124,8 +123,9 @@ class VanillaTrainer:
         return {"best_val_masked_dice_loss": best, "history": history}
 
     def save_checkpoint(self, out_dir: str | Path, record: dict) -> Path:
-        out = Path(out_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        torch.save(self.net.state_dict(), out / "model.pt")
-        (out / "checkpoint.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
-        return out / "model.pt"
+        from medos_trainer.vanilla.infer import save_inference_bundle
+
+        save_inference_bundle(
+            out_dir, self.net, record, patch_size=self.plan.patch_size
+        )
+        return Path(out_dir) / "model.pt"
