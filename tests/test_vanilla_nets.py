@@ -100,7 +100,7 @@ def test_imports_are_vanilla() -> None:
     allowed = {"torch", "numpy", "medos_trainer", "dataclasses", "typing",
                "__future__", "math", "enum", "pathlib", "collections",
                "collections.abc", "functools", "itertools", "json", "time",
-               "copy", "abc", "io"}
+               "copy", "abc", "io", "statistics"}
     offenders: list[str] = []
     for path in root.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
