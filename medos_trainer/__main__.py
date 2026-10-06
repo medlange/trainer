@@ -1,20 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 """`python -m medos_trainer` — the Medlange Trainer command line.
 
-SIX SUBCOMMANDS, AND NOTHING ELSE
+THE SUBCOMMANDS, AND NOTHING ELSE
 
-    vanilla-plan            fingerprint a directory of `.npz` cases and write the
-                            derived plan (patch size, batch size, schedule) with the
-                            reasons attached
-    vanilla-fit             plan + train + write an inference bundle, no platform:
-                            cases in, `model.pt` + `net_config.json` + `fit_plan.json` out
-    vanilla-import-nnunet   convert an nnU-Net NIfTI layout (imagesTr/ + labelsTr/)
-                            into `.npz` cases the vanilla stack reads
-    predict                 run a saved bundle over one case (sliding window)
-    declare-environment     emit `MEDOS_TRAINING_ENVIRONMENT`'s nine keys, observed
-    doctor                  what this installation can and cannot do right now, as a
-                            document — the answer to "is the GPU attached" that does
-                            not require starting a training run
+    vanilla-plan             fingerprint a directory of `.npz` cases and write the
+                             derived plan (patch size, batch size, schedule) with the
+                             reasons attached
+    vanilla-fit              plan + train + write an inference bundle, no platform:
+                             cases in, `model.pt` + `net_config.json` + `fit_plan.json` out
+    vanilla-crossval         k-fold cross-validation: one plan, per-fold refits,
+                             `fold-{k}/` bundles and a `report.json` with the fold
+                             assignment and the aggregate
+    vanilla-evaluate         per-case and aggregate Dice of a bundle over a cases dir
+    vanilla-import-nnunet    convert an nnU-Net NIfTI layout (imagesTr/ + labelsTr/)
+                             into `.npz` cases the vanilla stack reads
+    vanilla-import-dicom     convert ONE DICOM series into one `.npz` case
+                             (image + spacing, no label — the inference door in)
+    export                   export a bundle's served net to TorchScript and/or ONNX
+    predict                  run a saved bundle over one case (sliding window)
+    declare-environment      emit `MEDOS_TRAINING_ENVIRONMENT`'s nine keys, observed
+    doctor                   what this installation can and cannot do right now, as a
+                             document — the answer to "is the GPU attached" that does
+                             not require starting a training run
 
 THE MODULE IMPORTS NO `medos`. The trainer is a standalone vanilla-PyTorch
 framework; every input is a path on the local filesystem and every output is a
@@ -26,12 +33,17 @@ THE TORCH IMPORTS ARE DELIBERATELY INSIDE THE FUNCTIONS that need them, so
 `doctor` and `declare-environment` answer on a machine that can import this
 package without paying for a torch import they may not need... and so the
 module imports cleanly in environments where only the plan/data layers are
-wanted.
+wanted. torch IS THE ONE DEPENDENCY THE INSTALLER CHOOSES (the CUDA build is
+a property of the machine, so `medos-trainer`'s package metadata cannot pin
+it — see README.md's Install section): the training subcommands therefore
+REFUSE WITH A NAMED MESSAGE when torch is absent, instead of surfacing a
+ModuleNotFoundError from three frames deep. `doctor` reports the same fact.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
@@ -41,12 +53,48 @@ from typing import Any
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 
+#: Subcommands that cannot do anything without torch. Guarded up front in
+#: `main` so a torch-less installation gets a sentence it can act on, not a
+#: traceback. `vanilla-plan` needs it too (the plan layer builds FitPlans and
+#: network configs); only `doctor`, `declare-environment` and `--help` truly
+#: run without it.
+_TORCH_COMMANDS = {
+    "vanilla-fit",
+    "vanilla-crossval",
+    "vanilla-evaluate",
+    "vanilla-plan",
+    "vanilla-import-nnunet",
+    "vanilla-import-dicom",
+    "predict",
+    "export",
+}
+
 
 def _logging() -> None:
     logging.basicConfig(
         level=os.environ.get("MEDOS_TRAINER_LOG_LEVEL", "INFO").upper(),
         format=_LOG_FORMAT,
         stream=sys.stdout,
+    )
+
+
+def _torch_or_refuse(command: str) -> str | None:
+    """The named refusal a torch-less installation gets for training commands.
+
+    torch is deliberately NOT a package dependency (the right build depends on
+    the machine's CUDA), so the missing-dependency failure lands HERE, in the
+    user's language, with the fix spelled out. Returns the refusal text, or
+    None when torch imports.
+    """
+    if importlib.util.find_spec("torch") is not None:
+        return None
+    return (
+        f"medos-trainer: '{command}' needs PyTorch, which is not installed in this "
+        "environment. Medlange Trainer does not pin torch — install the build "
+        "matching your machine's CUDA (or the CPU build):\n"
+        "    pip install torch --index-url https://download.pytorch.org/whl/cu128\n"
+        "    pip install torch --index-url https://download.pytorch.org/whl/cpu\n"
+        "See the Install section of the README."
     )
 
 
@@ -72,6 +120,29 @@ def _predict(args: argparse.Namespace) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(out, label=label, probabilities=probabilities)
     print(f"wrote {out} label={label.shape} probabilities={probabilities.shape}")
+    return 0
+
+
+def _export(args: argparse.Namespace) -> int:
+    """Bundle in, serving artefacts out — TorchScript and/or ONNX plus the
+    export.json manifest that names the file, the shapes and the source
+    bundle's sha256. A requested format whose optional dependency is absent
+    is REFUSED UP FRONT, named, before anything is written — half an export
+    directory is worse than none."""
+    from medos_trainer.vanilla.export import export_bundle
+
+    formats = ("torchscript", "onnx") if args.format == "both" else (args.format,)
+    if "onnx" in formats and importlib.util.find_spec("onnx") is None:
+        print(
+            "medos-trainer: ONNX export needs the onnx package: pip install onnx",
+            file=sys.stderr,
+        )
+        return 3
+    written = export_bundle(args.checkpoint_dir, args.out, formats=formats,
+                            device=args.device)
+    for fmt, path in written.items():
+        print(f"wrote {path} ({fmt})")
+    print(f"wrote {Path(args.out) / 'export.json'}")
     return 0
 
 
@@ -113,12 +184,22 @@ def _doctor() -> int:
         }
     except (FileNotFoundError, ValueError) as exc:
         report["stamp"] = {"error": str(exc)}
-    try:
-        report["hardware"] = observe_hardware()
-        report["can_fit"] = True
-    except HardwareUnavailable as exc:
-        report["hardware"] = {"error": str(exc)}
+    if importlib.util.find_spec("torch") is None:
+        # TORCH IS THE INSTALLER'S CHOICE, and a doctor that crashed on its
+        # absence would be useless on exactly the machine that needs it. The
+        # report says so, plainly, and every training subcommand refuses with
+        # the same fact in its message.
+        report["torch"] = "not installed"
+        report["hardware"] = {"error": "torch is not installed; no hardware probe ran"}
         report["can_fit"] = False
+    else:
+        report["torch"] = "installed"
+        try:
+            report["hardware"] = observe_hardware()
+            report["can_fit"] = True
+        except HardwareUnavailable as exc:
+            report["hardware"] = {"error": str(exc)}
+            report["can_fit"] = False
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report.get("can_fit") else 2
 
@@ -151,6 +232,57 @@ def build_parser() -> argparse.ArgumentParser:
     vanilla_fit.add_argument("--steps-per-epoch", type=int, default=None)
     vanilla_fit.add_argument("--seed", type=int, default=0)
     vanilla_fit.add_argument("--device", default="cpu")
+    vanilla_fit.add_argument(
+        "--resume-from", default=None, metavar="BUNDLE_DIR",
+        help="bundle with training_state.pt: restore net/optimizer/scheduler "
+             "and continue at the recorded epoch + 1",
+    )
+    vanilla_fit.add_argument(
+        "--max-val-cases", type=int, default=8,
+        help="cap the post-fit evaluation's val cases (None = all; default 8)",
+    )
+    vanilla_fit.add_argument(
+        "--no-augment-resample", action="store_true",
+        help="disable the plan's scale/elastic augmentation (mirror/rotate stays on)",
+    )
+    vanilla_fit.add_argument(
+        "--amp", action="store_true",
+        help="autocast + GradScaler on CUDA devices (ignored on CPU)",
+    )
+    vanilla_fit.add_argument(
+        "--foreground-prob", type=float, default=None,
+        help="override the sampler's foreground bias in [0, 1] (plan default 1/3)",
+    )
+
+    vanilla_crossval = sub.add_parser(
+        "vanilla-crossval",
+        help="k-fold cross-validation: one plan, per-fold bundles, one report",
+    )
+    vanilla_crossval.add_argument("--data", required=True, help="directory of .npz cases")
+    vanilla_crossval.add_argument("--preset", default="cpu")
+    vanilla_crossval.add_argument("--out", required=True, help="output directory")
+    vanilla_crossval.add_argument("--folds", type=int, default=5)
+    vanilla_crossval.add_argument("--epochs", type=int, default=None)
+    vanilla_crossval.add_argument("--steps-per-epoch", type=int, default=None)
+    vanilla_crossval.add_argument("--seed", type=int, default=0)
+    vanilla_crossval.add_argument("--device", default="cpu")
+    vanilla_crossval.add_argument(
+        "--max-val-cases", type=int, default=None,
+        help="cap each fold's evaluation (folds are small; None = all)",
+    )
+    vanilla_crossval.add_argument(
+        "--foreground-prob", type=float, default=None,
+        help="override the sampler's foreground bias in [0, 1] (plan default 1/3)",
+    )
+
+    vanilla_evaluate = sub.add_parser(
+        "vanilla-evaluate",
+        help="per-case and aggregate Dice of a bundle over a cases directory",
+    )
+    vanilla_evaluate.add_argument("--checkpoint-dir", required=True, help="bundle directory")
+    vanilla_evaluate.add_argument("--data", required=True, help="directory of .npz cases")
+    vanilla_evaluate.add_argument("--out", required=True, help="report JSON path")
+    vanilla_evaluate.add_argument("--max-cases", type=int, default=None)
 
     vanilla_import = sub.add_parser(
         "vanilla-import-nnunet",
@@ -159,6 +291,24 @@ def build_parser() -> argparse.ArgumentParser:
     vanilla_import.add_argument("--images", required=True, help="imagesTr/ directory")
     vanilla_import.add_argument("--labels", required=True, help="labelsTr/ directory")
     vanilla_import.add_argument("--out", required=True, help="output .npz directory")
+
+    dicom_import = sub.add_parser(
+        "vanilla-import-dicom",
+        help="convert ONE DICOM series into one .npz case (image + spacing)",
+    )
+    dicom_import.add_argument("--series", required=True,
+                              help="directory holding the series' slices")
+    dicom_import.add_argument("--out", required=True, help="output .npz file path")
+
+    export_parser = sub.add_parser(
+        "export",
+        help="export a bundle to TorchScript and/or ONNX serving artefacts",
+    )
+    export_parser.add_argument("--checkpoint-dir", required=True, help="bundle directory")
+    export_parser.add_argument("--out", required=True, help="output directory")
+    export_parser.add_argument("--format", choices=("torchscript", "onnx", "both"),
+                               default="both")
+    export_parser.add_argument("--device", default="cpu")
 
     declare_parser = sub.add_parser(
         "declare-environment", help="emit MEDOS_TRAINING_ENVIRONMENT's nine keys"
@@ -190,10 +340,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     _logging()
     args = build_parser().parse_args(argv)
+    if args.command != "doctor":
+        refusal = _torch_or_refuse(args.command)
+        if refusal is not None:
+            print(refusal, file=sys.stderr)
+            return 3
     if args.command == "declare-environment":
         return _declare_environment(args.out, args.allow_cpu)
     if args.command == "predict":
         return _predict(args)
+    if args.command == "export":
+        return _export(args)
     if args.command == "vanilla-plan":
         from medos_trainer.standalone import plan_command
 
@@ -207,14 +364,44 @@ def main(argv: list[str] | None = None) -> int:
             args.data, args.preset, args.out,
             epochs=args.epochs, steps_per_epoch=args.steps_per_epoch,
             seed=args.seed, device=args.device,
+            resume_from=args.resume_from, max_val_cases=args.max_val_cases,
+            use_amp=args.amp, augment_resample=False if args.no_augment_resample else None,
+            foreground_prob=args.foreground_prob,
         )
         print(json.dumps(summary, indent=2))
+        return 0
+    if args.command == "vanilla-crossval":
+        from medos_trainer.standalone import crossval_command
+
+        report = crossval_command(
+            args.data, args.preset, args.out,
+            folds=args.folds, epochs=args.epochs,
+            steps_per_epoch=args.steps_per_epoch, seed=args.seed, device=args.device,
+            max_val_cases=args.max_val_cases, foreground_prob=args.foreground_prob,
+        )
+        print(json.dumps(report["aggregate"], indent=2))
+        print(f"wrote {Path(args.out) / 'report.json'}")
+        return 0
+    if args.command == "vanilla-evaluate":
+        from medos_trainer.standalone import evaluate_command
+
+        report = evaluate_command(
+            args.checkpoint_dir, args.data, args.out, max_cases=args.max_cases
+        )
+        print(json.dumps(report["aggregate"], indent=2))
+        print(f"wrote {args.out}")
         return 0
     if args.command == "vanilla-import-nnunet":
         from medos_trainer.standalone import import_nnunet_dataset
 
         n = import_nnunet_dataset(args.images, args.labels, args.out)
         print(f"converted {n} cases into {args.out}")
+        return 0
+    if args.command == "vanilla-import-dicom":
+        from medos_trainer.standalone import import_dicom_series
+
+        import_dicom_series(args.series, args.out)
+        print(f"wrote {args.out}")
         return 0
     return _doctor()
 

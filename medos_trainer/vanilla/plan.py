@@ -139,6 +139,11 @@ class PlannedRun:
             learning_rate=self.learning_rate,
             weight_decay=self.weight_decay,
             foreground_prob=self.foreground_prob,
+            # A REAL PLAN gets the full augmentation family: mirror/rotate are
+            # free of invention risk, and the scale/elastic pair is the part
+            # that teaches scale and deformation invariance. Hand-written
+            # FitPlans default it off and keep their byte-exact dynamics.
+            augment_resample=True,
         )
 
 

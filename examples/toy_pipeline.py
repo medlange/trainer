@@ -56,7 +56,13 @@ def main() -> None:
         print(f"  because {reason}")
 
     summary = fit_command(cases, "cpu", work / "bundle",
-                          epochs=6, steps_per_epoch=8, seed=0)
+                          epochs=6, steps_per_epoch=8, seed=0,
+                          # A six-case toy has no background variety to speak
+                          # of: two background patches in three would let the
+                          # net converge to "all background" long before it
+                          # ever learns the ball. On a corpus this small,
+                          # every sampled patch should carry the structure.
+                          foreground_prob=1.0)
     print("fit:", json.dumps(summary["best_val_masked_dice_loss"]), "best val masked dice")
 
     predictor = load_predictor(work / "bundle")

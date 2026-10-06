@@ -93,24 +93,73 @@ def test_imports_are_vanilla() -> None:
     """THE POINT OF THE PACKAGE: the vanilla stack imports nothing outside the
     stdlib and torch. sys.modules cannot prove this (the suite shares a
     process with the nnU-Net backend tests), so the gate is static: parse the
-    package's AST and refuse any framework import by name."""
+    package's AST and refuse any framework import by name.
+
+    THE GATE READS DEPTH, because the stack's own discipline is depth-based:
+    a MODULE-LEVEL import binds every consumer of the package to that
+    dependency, so module-level names must be in the plain allowed set; a
+    FUNCTION-LEVEL import is the tree's lazy-import pattern (pay nothing for
+    what you do not use), and gets its own explicit set. `onnx` is the one
+    sanctioned entry there — the ONNX export branch lazy-imports it and raises
+    a named RuntimeError without it; an onnx entry at MODULE level, or any
+    other lazy name, still fails.
+    """
     import ast
 
     root = Path(__file__).resolve().parents[1] / "medos_trainer" / "vanilla"
     allowed = {"torch", "numpy", "medos_trainer", "dataclasses", "typing",
                "__future__", "math", "enum", "pathlib", "collections",
                "collections.abc", "functools", "itertools", "json", "time",
-               "copy", "abc", "io", "statistics"}
+               "copy", "abc", "io", "statistics",
+               # scipy is THIS TREE'S OWN numeric dependency, not a framework:
+               # the resampling augmentation (data.py) and the detection/
+               # overlap metric modules already use it. The gate's purpose is
+               # keeping nnU-Net/MONAI out, not keeping the scientific Python
+               # stack out.
+               "scipy",
+               # hashlib: the export manifest digests model.pt (sha256). Stdlib,
+               # deterministic, no framework — same family as json/time above.
+               "hashlib"}
+    # THE LAZY SET: function-level imports the optional extras demand. Each
+    # entry exists ONLY as `import <name>` inside the one function that needs
+    # it, and that function refuses with a named RuntimeError when absent.
+    allowed_lazy = {"onnx"}
+
+    class Scanner(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.module_level: list[str] = []
+            self.function_level: list[str] = []
+            self._depth = 0
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._depth += 1
+            self.generic_visit(node)
+            self._depth -= 1
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._depth += 1
+            self.generic_visit(node)
+            self._depth -= 1
+
+        def _record(self, names: list[str]) -> None:
+            target = self.function_level if self._depth else self.module_level
+            target.extend(names)
+
+        def visit_Import(self, node: ast.Import) -> None:
+            self._record([a.name.split(".")[0] for a in node.names])
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            if node.module:
+                self._record([node.module.split(".")[0]])
+
     offenders: list[str] = []
     for path in root.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            names: list[str] = []
-            if isinstance(node, ast.Import):
-                names = [a.name.split(".")[0] for a in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                names = [node.module.split(".")[0]]
-            for name in names:
-                if name not in allowed:
-                    offenders.append(f"{path.name}: {name}")
+        scanner = Scanner()
+        scanner.visit(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        for name in scanner.module_level:
+            if name not in allowed:
+                offenders.append(f"{path.name} (module): {name}")
+        for name in scanner.function_level:
+            if name not in allowed | allowed_lazy:
+                offenders.append(f"{path.name} (lazy): {name}")
     assert not offenders, f"vanilla stack imports non-vanilla modules: {offenders}"

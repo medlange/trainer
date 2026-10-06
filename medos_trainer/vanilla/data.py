@@ -10,10 +10,14 @@ THE PATCH SAMPLER implements nnU-Net's foreground bias because it works: with
 probability `foreground_prob` the patch centre is drawn from the labelled
 foreground, otherwise uniformly. Rare structures actually get seen.
 
-AUGMENTATION stays in the family of transforms that cannot invent anatomy:
-mirror along any axis and 90-degree in-plane rotation. Resampling-based
-augmentation (scale/elastic) belongs to a later step with proper interpolation
-rules — shipping it half-defined would be worse than not shipping it.
+AUGMENTATION has two tiers, and the line between them is "can this invent
+anatomy": mirror along any axis and 90-degree in-plane rotation cannot, and
+apply always; the resampling pair — random zoom and a smooth elastic warp —
+can move a border voxel's influence but is built so it never materialises
+voxels from nothing (zoom-out pads by REFLECTING the patch's own border,
+elastic out-of-range lookups clamp to the nearest real voxel). Interpolation
+rules follow the label/mask-are-discrete contract: image cubic, label and
+mask nearest.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import scipy.ndimage
 
 
 @dataclass(frozen=True)
@@ -66,6 +71,11 @@ class Patch:
     """Centre of the patch in the case's voxel grid — inference and audit
     tooling need to know WHERE a patch came from."""
     centre: tuple[int, int, int]
+    """The case's voxel spacing, carried so spacing-aware augmentation (the
+    elastic warp's millimetre magnitude) can convert mm to voxels per axis.
+    Defaults to isotropic 1 mm — the value `load_case_npz` assumes when the
+    `.npz` names no spacing — so a hand-built Patch is never wrong-shaped."""
+    spacing_mm: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
 
 class PatchSampler:
@@ -90,6 +100,7 @@ class PatchSampler:
             label=case.label[sl],
             mask=None if case.mask is None else case.mask[(slice(None),) + sl],
             centre=centre,
+            spacing_mm=case.spacing_mm,
         )
 
     def _centre(self, case: Case, rng: np.random.Generator) -> tuple[int, int, int]:
@@ -140,7 +151,136 @@ def augment_mirror_rotate(patch: Patch, rng: np.random.Generator) -> Patch:
         label=np.ascontiguousarray(label),
         mask=None if mask is None else np.ascontiguousarray(mask),
         centre=patch.centre,
+        spacing_mm=patch.spacing_mm,
     )
+
+
+def augment_scale_elastic(
+    patch: Patch,
+    rng: np.random.Generator,
+    scale_range: tuple[float, float] = (0.85, 1.25),
+    elastic_alpha_mm: float = 2.0,
+    elastic_grid: tuple[int, int, int] = (4, 4, 4),
+) -> Patch:
+    """Random per-axis zoom, then a smooth elastic warp — patch-shaped output.
+
+    WHY THIS EXISTS: mirroring and rotation teach the net invariance to pose,
+    but real imaging varies in SCALE and in soft DEFORMATION. Both are
+    resampling operations, and resampling can invent anatomy if it is allowed
+    to look outside the patch — so every out-of-range rule here is a border
+    rule: zooming out pads by REFLECTING the patch's own border, and the
+    elastic warp clamps lookups to the nearest real voxel (`mode="nearest"`).
+    Nothing the transform writes came from anywhere but the patch itself.
+
+    THE INTERPOLATION CONTRACT follows the label/mask-are-discrete rule:
+    the image warps cubic (order 3), the label and mask nearest (order 0) —
+    a fractional class membership or a fractional "labelled" flag would both
+    be lies. `elastic_alpha_mm` is a PHYSICAL magnitude, converted to voxels
+    through `patch.spacing_mm`, so the same number means the same deformation
+    on 0.5 mm CT and 3 mm thick-slice data. THE DEFAULT IS MILD ON PURPOSE:
+    the plan's patch is physically ~12-20 mm, and a per-axis displacement std
+    beyond a sixth of that scrambles image-label alignment instead of
+    bending it — 2 mm deforms, 15 mm destroys. `elastic_grid` is the
+    displacement field's coarse lattice (4x4x4 by default); it is upsampled,
+    Gaussian-smoothed at sigma = patch/8, then scaled so its per-axis std
+    equals the voxel alpha — which also makes `elastic_alpha_mm=0` exactly
+    the identity.
+    """
+    image, label, mask = patch.image, patch.label, patch.mask
+    shape = tuple(int(v) for v in image.shape[1:])
+
+    factors = rng.uniform(scale_range[0], scale_range[1], size=3)
+    if not np.all(factors == 1.0):
+        channel = (1.0,)
+        zoom_image = channel + tuple(float(f) for f in factors)
+        zoom_label = tuple(float(f) for f in factors)
+        # Order 3 for the image, 0 for the discrete arrays — fractional labels
+        # would invent classes.
+        image = scipy.ndimage.zoom(image, zoom_image, order=3)
+        label = scipy.ndimage.zoom(label, zoom_label, order=0)
+        if mask is not None:
+            mask = scipy.ndimage.zoom(mask, zoom_image, order=0)
+        # Recentre on the patch shape: crop the surplus when zoomed in, pad by
+        # border reflection when zoomed out — reflection, never constant zero,
+        # because a zero pad would teach the net that anatomy fades to nothing
+        # at every patch edge.
+        image = _crop_or_reflect_pad(image, shape)
+        label = _crop_or_reflect_pad(label, shape)
+        mask = None if mask is None else _crop_or_reflect_pad(mask, shape)
+
+    if elastic_alpha_mm > 0.0:
+        field = _elastic_displacement(shape, patch.spacing_mm, elastic_alpha_mm,
+                                      elastic_grid, rng)
+        # map_coordinates addresses an (ndim, ...) lattice; the label is 3-D
+        # so the field applies directly, the image/mask warp per channel with
+        # the same spatial field.
+        label = scipy.ndimage.map_coordinates(
+            label, field, order=0, mode="nearest", output=label.dtype)
+        image = np.stack([
+            scipy.ndimage.map_coordinates(
+                image[c], field, order=3, mode="nearest").astype(np.float32)
+            for c in range(image.shape[0])
+        ])
+        if mask is not None:
+            mask = np.stack([
+                scipy.ndimage.map_coordinates(
+                    mask[c], field, order=0, mode="nearest", output=np.float32)
+                for c in range(mask.shape[0])
+            ])
+
+    return Patch(
+        image=np.ascontiguousarray(image),
+        label=np.ascontiguousarray(label),
+        mask=None if mask is None else np.ascontiguousarray(mask),
+        centre=patch.centre,
+        spacing_mm=patch.spacing_mm,
+    )
+
+
+def _crop_or_reflect_pad(arr: np.ndarray, target: tuple[int, int, int]) -> np.ndarray:
+    """Bring the spatial axes of `arr` to `target`: central crop when larger,
+    border-reflection pad when smaller. Channel axes ride along untouched."""
+    out = arr
+    spatial = range(out.ndim - 3, out.ndim)
+    for axis, t in zip(spatial, target):
+        n = out.shape[axis]
+        if n > t:
+            start = (n - t) // 2
+            out = np.take(out, indices=range(start, start + t), axis=axis)
+        elif n < t:
+            left = (t - n) // 2
+            right = t - n - left
+            pads = [(0, 0)] * out.ndim
+            pads[axis] = (left, right)
+            out = np.pad(out, pads, mode="reflect")
+    return out
+
+
+def _elastic_displacement(
+    shape: tuple[int, int, int],
+    spacing_mm: tuple[float, float, float],
+    alpha_mm: float,
+    grid: tuple[int, int, int],
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """(3, K, J, I) lookup coordinates: integer lattice plus a smoothed,
+    magnitude-calibrated displacement field."""
+    coarse = rng.normal(0.0, 1.0, (3, *grid)).astype(np.float32)
+    zooms = (1.0,) + tuple(n / g for n, g in zip(shape, grid))
+    field = scipy.ndimage.zoom(coarse, zooms, order=3)
+    coords = np.empty((3, *shape), dtype=np.float32)
+    for axis, n in enumerate(shape):
+        smoothed = scipy.ndimage.gaussian_filter(field[axis], sigma=max(n / 8.0, 1e-3))
+        std = float(smoothed.std())
+        if std > 0.0:
+            # Calibrate the magnitude: per-axis std == alpha in VOXELS, with mm
+            # converted through the spacing. Scaling (not clipping) keeps the
+            # field smooth and zero-mean.
+            smoothed = smoothed * (alpha_mm / spacing_mm[axis] / std)
+        lattice = np.arange(n, dtype=np.float32)
+        coords[axis] = lattice.reshape(
+            (-1,) + (1,) * (len(shape) - 1 - axis)) + smoothed
+    return coords
 
 
 def make_batch(patches: list[Patch]) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:

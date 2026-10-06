@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+# Medlange Trainer's packaging: pip-installable, torch BY THE INSTALLER.
+#
+# WHY TORCH IS NOT A DEPENDENCY. torch is the one wheel whose right build is a
+# property of the MACHINE (CUDA version, CPU-only, ROCm), not of this package:
+# pinning `torch==2.7.1+cu128` here would install an NVIDIA userspace on a
+# laptop that has no NVIDIA anything. So dependencies carry numpy and scipy —
+# the numeric floor the package imports unconditionally — and torch is the
+# installer's choice, documented in README.md's Install section. The console
+# script refuses the training subcommands with a named message when torch is
+# absent, and `doctor` reports it; nothing here pretends the fit can run
+# without it.
+#
+# THE OPTIONAL EXTRAS mirror the lazy-import discipline: nibabel exists only
+# inside `vanilla-import-nnunet`, pydicom only inside
+# `vanilla-import-dicom`, so the extras `nifti` and `dicom` are the honest
+# shape of that fact.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "medlange-trainer"
+version = "0.5.0"
+description = "A vanilla-PyTorch framework for volumetric medical image segmentation: an nnU-Net-class replacement written from scratch — own 3D UNet, own fingerprint-based planning, own masked-loss training, own sliding-window inference. No nnU-Net, no MONAI, no platform."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "numpy",
+    "scipy",
+]
+
+[project.optional-dependencies]
+# NIfTI import (`vanilla-import-nnunet`) — imported lazily inside the importer.
+nifti = ["nibabel"]
+# DICOM series import (`vanilla-import-dicom`) — imported lazily inside the importer.
+dicom = ["pydicom"]
+
+[project.scripts]
+medos-trainer = "medos_trainer.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["medos_trainer*"]
