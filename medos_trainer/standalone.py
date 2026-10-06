@@ -243,15 +243,24 @@ def plan_command(data_dir: str | Path, preset: str, out: str | Path) -> dict:
 
 
 def _dice_rows(
-    predictor: SlidingWindowPredictor, cases: list[Case], max_cases: int | None = None
+    predictor: SlidingWindowPredictor, cases: list[Case], max_cases: int | None = None,
+    num_classes: int | None = None,
 ) -> dict:
     """Per-case per-class Dice against ground truth, restricted to supervised
     voxels; the aggregate the report is judged by. Shared by
-    `evaluate_command`, `fit_command`'s post-fit evaluation and
-    `crossval_command`'s per-fold evaluation, so the number means ONE thing
-    everywhere it appears."""
+    `evaluate_command`, `fit_command`'s post-fit evaluation,
+    `crossval_command`'s per-fold and ensemble evaluations, so the number
+    means ONE thing everywhere it appears. `num_classes` is derivable from a
+    single bundle's config; an `EnsemblePredictor` carries it as a direct
+    attribute, and either form is accepted here."""
     selected = cases if max_cases is None else cases[:max_cases]
-    num_classes = int(predictor.net.config.num_classes)
+    if num_classes is None:
+        # A single bundle carries the class table on its net's config; an
+        # EnsemblePredictor carries it as its own attribute. Either answers.
+        attr = getattr(predictor, "num_classes", None)
+        num_classes = int(
+            attr if attr is not None else predictor.net.config.num_classes
+        )
     rows = []
     for case in selected:
         label, _ = predictor.predict(case.image)
@@ -287,6 +296,21 @@ def _dice_rows(
     return {"cases": rows, "aggregate": aggregate}
 
 
+def evaluate_predictor(
+    predictor, cases: list[Case], out: str | Path | None = None,
+    max_cases: int | None = None,
+) -> dict:
+    """The predictor-plus-cases evaluation `evaluate_command` is a thin shell
+    over — and the shape `crossval_command`'s ensemble evaluation reuses, so
+    "the number" is computed by one code path whether the predictor is one
+    bundle or the mean of a fold's. Writes JSON only when `out` is given."""
+    report = _dice_rows(predictor, cases, max_cases=max_cases,
+                        num_classes=getattr(predictor, "num_classes", None))
+    if out is not None:
+        Path(out).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
 def evaluate_command(
     checkpoint_dir: str | Path,
     data_dir: str | Path,
@@ -302,9 +326,8 @@ def evaluate_command(
     from medos_trainer.vanilla.infer import load_predictor
 
     cases = load_cases_dir(data_dir)
-    report = _dice_rows(load_predictor(checkpoint_dir), cases, max_cases=max_cases)
-    Path(out).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    return report
+    return evaluate_predictor(load_predictor(checkpoint_dir), cases, out=out,
+                              max_cases=max_cases)
 
 
 def fit_command(
@@ -321,6 +344,7 @@ def fit_command(
     use_amp: bool = False,
     augment_resample: bool | None = None,
     foreground_prob: float | None = None,
+    cascade_from: str | Path | None = None,
 ) -> dict:
     """The whole autonomous pipeline: data -> fingerprint -> plan -> fit -> bundle.
 
@@ -338,8 +362,21 @@ def fit_command(
     bias — on a tiny corpus where background patches would let the net
     converge to "all background", pushing it toward 1.0 is the honest knob
     (every patch then carries the structure being taught).
+
+    `cascade_from` SWITCHES THE COMMAND TO CASCADE MODE: the coarse bundle at
+    that path predicts every case, its foreground probability becomes an
+    extra image channel, and the fine model is planned and fit with
+    `input_channels=C+1` — the whole thing delegated to
+    `fit_cascade_command`, which writes `out/fine/` + `out/cascade.json`.
     """
+    if cascade_from is not None:
+        return fit_cascade_command(
+            data_dir, preset, out_dir, cascade_from,
+            epochs=epochs, steps_per_epoch=steps_per_epoch,
+            seed=seed, device=device,
+        )
     import torch
+    from medos_trainer.vanilla.distributed import get_rank
     from medos_trainer.vanilla.infer import load_predictor
     from medos_trainer.vanilla.nets import build_unet
     from medos_trainer.vanilla.trainer import VanillaTrainer
@@ -369,7 +406,9 @@ def fit_command(
                   "best_val_masked_dice_loss": float(record["val_masked_dice_loss"])}
     split = max(1, len(cases) // 5)
     train, val = cases[split:], cases[:split]
-    result = trainer.fit(train, val, np.random.default_rng(seed),
+    # UNDER DDP each rank draws its own patch stream: seed+rank. Single
+    # process, get_rank() is 0 and the seed is exactly what it always was.
+    result = trainer.fit(train, val, np.random.default_rng(seed + get_rank()),
                          out_dir=out_dir, resume=resume)
     evaluation = _dice_rows(load_predictor(out_dir), val, max_cases=max_val_cases)
     return {"best_val_masked_dice_loss": result["best_val_masked_dice_loss"],
@@ -378,6 +417,69 @@ def fit_command(
             "reasons": list(plan.reasons),
             "history": result["history"],
             "evaluation": evaluation}
+
+
+def fit_cascade_command(
+    data_dir: str | Path,
+    preset: str,
+    out_dir: str | Path,
+    coarse_dir: str | Path,
+    *,
+    epochs: int | None = None,
+    steps_per_epoch: int | None = None,
+    seed: int = 0,
+    device: str = "cpu",
+) -> dict:
+    """THE CASCADE FIT: a coarse bundle's predictions become the fine model's
+    extra input channel.
+
+    Mirrors `fit_command`'s skeleton — fingerprint, plan, fit, evaluate — but
+    the cases the plan sees are the CASCADE cases: each case's image gained
+    the coarse foreground probability as channel C+1 (`build_cascade_cases`),
+    and the fine network is built with `input_channels=C+1`
+    (`plan.network_config(input_channels=...)`), so `load_predictor` on the
+    fine bundle rebuilds the wider stem from `net_config.json` alone. Writes
+    `out/fine/` (the bundle) and `out/cascade.json` (the coarse bundle's
+    path, the enlarged channel count, and the fit summary).
+    """
+    import torch
+    from medos_trainer.vanilla.cascade import build_cascade_cases
+    from medos_trainer.vanilla.distributed import get_rank
+    from medos_trainer.vanilla.infer import load_predictor
+    from medos_trainer.vanilla.nets import build_unet
+    from medos_trainer.vanilla.trainer import VanillaTrainer
+
+    cases = load_cases_dir(data_dir)
+    coarse = load_predictor(coarse_dir, device=device)
+    cascade_cases = build_cascade_cases(coarse, cases, device=device)
+    input_channels = int(cascade_cases[0].image.shape[0])
+
+    plan = _planned_run(cascade_cases, preset, epochs, steps_per_epoch)
+    fit_plan = plan.fit_plan()
+    torch.manual_seed(seed)
+    net = build_unet(plan.network_config(input_channels=input_channels))
+    trainer = VanillaTrainer(net, num_classes=plan.fingerprint.num_classes,
+                             plan=fit_plan, device=device)
+    split = max(1, len(cascade_cases) // 5)
+    train, val = cascade_cases[split:], cascade_cases[:split]
+    fine_dir = Path(out_dir) / "fine"
+    result = trainer.fit(train, val, np.random.default_rng(seed + get_rank()),
+                         out_dir=fine_dir)
+    evaluation = evaluate_predictor(load_predictor(fine_dir), val)
+    summary = {"best_val_masked_dice_loss": result["best_val_masked_dice_loss"],
+               "patch_size": list(plan.patch_size),
+               "preset": plan.preset.name,
+               "reasons": list(plan.reasons),
+               "history": result["history"],
+               "evaluation": evaluation}
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "cascade.json").write_text(
+        json.dumps({"coarse": str(coarse_dir), "input_channels": input_channels,
+                    "fit": summary}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return summary
 
 
 def crossval_command(
@@ -409,9 +511,19 @@ def crossval_command(
     writes a full bundle at `out/fold-{k}/`, and evaluates that bundle on its
     own fold. `report.json` aggregates the per-fold best validation scores
     with the statistics module (mean and sample stdev).
+
+    THE ENSEMBLE ROW: after the folds, every `fold-{k}/` bundle votes on the
+    UNION OF ALL VAL CASES — the whole corpus, each case once, predicted by
+    the full ensemble, the same `_dice_rows` every other evaluation uses.
+    This is deliberately NOT "each case by its own held-out fold": a fold's
+    bundle saw that case's fold-mates in training, but never the case, and
+    the honest ensemble claim is "K independent models vote on data none of
+    them trained on". The row carries the aggregate and `cases_used` only —
+    per-case rows live with the folds.
     """
     import torch
-    from medos_trainer.vanilla.infer import load_predictor
+    from medos_trainer.vanilla.distributed import get_rank
+    from medos_trainer.vanilla.infer import load_ensemble, load_predictor
     from medos_trainer.vanilla.nets import build_unet
     from medos_trainer.vanilla.trainer import VanillaTrainer
 
@@ -446,7 +558,10 @@ def crossval_command(
         trainer = VanillaTrainer(net, num_classes=plan.fingerprint.num_classes,
                                  plan=fit_plan, device=device)
         fold_dir = Path(out_dir) / f"fold-{fold}"
-        result = trainer.fit(train, val, np.random.default_rng(seed + fold),
+        # seed+fold reseeds the fold; +rank reseeds the rank inside it (0 when
+        # single-process — the historical stream, unchanged).
+        result = trainer.fit(train, val,
+                             np.random.default_rng(seed + fold + get_rank()),
                              out_dir=fold_dir)
         evaluation = _dice_rows(load_predictor(fold_dir), val,
                                 max_cases=max_val_cases)
@@ -469,7 +584,27 @@ def crossval_command(
     }
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    ensemble = load_ensemble(
+        [out / f"fold-{fold}" for fold in range(folds)], device=device
+    )
+    all_val = sorted(
+        {c.case_id: c for row in results for c in _cases_by_id(cases, row["val_cases"])}
+        .values(),
+        key=lambda c: c.case_id,
+    )
+    ensemble_eval = evaluate_predictor(ensemble, all_val)
+    report["ensemble"] = {
+        "aggregate": ensemble_eval["aggregate"],
+        "cases_used": ensemble_eval["aggregate"]["cases_used"],
+    }
     (out / "report.json").write_text(
         json.dumps(report, indent=2) + "\n", encoding="utf-8"
     )
     return report
+
+
+def _cases_by_id(cases: list[Case], case_ids: list[str]) -> list[Case]:
+    """The named cases, in the caller's id order — folds record val_cases as
+    ids; the ensemble pass needs the cases themselves."""
+    by_id = {c.case_id: c for c in cases}
+    return [by_id[name] for name in case_ids]

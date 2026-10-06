@@ -160,6 +160,77 @@ class SlidingWindowPredictor:
         )
 
 
+class EnsemblePredictor:
+    """K-fold averaging over single-model sliding-window predictors.
+
+    THE PREDICTION IS THE MEAN of the members' probability tensors, argmaxed.
+    Averaging probabilities (not logits, not labels) is the honest operation:
+    each member's softmax is a calibrated vote, and the mean of votes is the
+    vote of the mean — no member's confidence gets to veto another's.
+
+    EACH MEMBER KEEPS ITS OWN patch size, overlap and device: cross-validation
+    folds may legitimately disagree on the window (the plan is one, but the
+    served artifacts are independent), and the ensemble does not paper over
+    that. Members run SEQUENTIALLY, whole-volume each — batched member-by-
+    member, not fused: K passes over the volume instead of one fused pass is
+    the price of folds with different patch sizes, and it keeps this class a
+    plain composition of things `SlidingWindowPredictor` already guarantees.
+
+    MISMATCHES ARE REFUSED, NAMED: num_classes disagreement is caught at
+    construction (the configs are visible there), a shape disagreement at
+    predict time (each member is checked against the agreed
+    (num_classes, *image.shape)), and the offender is named by index in both.
+    """
+
+    def __init__(self, members: list[SlidingWindowPredictor]) -> None:
+        if not members:
+            raise ValueError("an ensemble needs at least one member")
+        classes = [int(m.net.config.num_classes) for m in members]
+        for idx, cls in enumerate(classes[1:], start=1):
+            if cls != classes[0]:
+                raise ValueError(
+                    f"ensemble member {idx} has num_classes={cls}; "
+                    f"member 0 has num_classes={classes[0]} — an ensemble "
+                    "averages probabilities, which demands one class table"
+                )
+        self.members = list(members)
+        self.num_classes = classes[0]
+
+    @torch.no_grad()
+    def predict(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """(C,K,J,I) image -> (label (K,J,I) int64, mean probabilities f32)."""
+        agreed = (self.num_classes,) + tuple(image.shape[-3:])
+        mean = None
+        for idx, member in enumerate(self.members):
+            _, probs = member.predict(image)
+            if probs.shape != agreed:
+                raise ValueError(
+                    f"ensemble member {idx} produced probabilities of shape "
+                    f"{probs.shape}; the agreed shape is {agreed} — members "
+                    "must share num_classes and predict the same volume"
+                )
+            mean = probs if mean is None else mean + probs
+        mean = mean / float(len(self.members))
+        return (
+            mean.argmax(axis=0).astype(np.int64),
+            mean.astype(np.float32),
+        )
+
+
+def load_ensemble(
+    checkpoint_dirs: list[str | Path],
+    overlap: float = 0.5,
+    batch_size: int = 2,
+    device: str = "cpu",
+) -> EnsemblePredictor:
+    """`load_predictor` per bundle, composed — the crossval-output door:
+    every `fold-*/` bundle a `crossval_command` wrote becomes one vote."""
+    return EnsemblePredictor(
+        [load_predictor(d, overlap=overlap, batch_size=batch_size, device=device)
+         for d in checkpoint_dirs]
+    )
+
+
 def served_net(net: VanillaUNet) -> VanillaUNet:
     """The served twin of a training net: same weights, one output tensor.
 

@@ -17,7 +17,9 @@ THE SUBCOMMANDS, AND NOTHING ELSE
     vanilla-import-dicom     convert ONE DICOM series into one `.npz` case
                              (image + spacing, no label — the inference door in)
     export                   export a bundle's served net to TorchScript and/or ONNX
-    predict                  run a saved bundle over one case (sliding window)
+    predict                  run a saved bundle over one case (sliding window) —
+                             or every fold bundle of a cross-validation output
+                             as one probability-averaging ensemble
     declare-environment      emit `MEDOS_TRAINING_ENVIRONMENT`'s nine keys, observed
     doctor                   what this installation can and cannot do right now, as a
                              document — the answer to "is the GPU attached" that does
@@ -105,16 +107,44 @@ def _predict(args: argparse.Namespace) -> int:
     run a trained model with is a component, not a framework. No platform,
     no run directory, no database — a checkpoint directory from `fit`, one
     case `.npz`, one output `.npz`.
+
+    THE PREDICTOR IS EITHER one bundle (`--checkpoint-dir`) or the ensemble
+    of every fold bundle a cross-validation wrote (`--ensemble-dir` — the
+    mean of the folds' probability maps). A crossval output holding no
+    `fold-*/model.pt` bundles is refused, named, with exit code 2.
     """
     import numpy as np
     from medos_trainer.vanilla.data import load_case_npz
-    from medos_trainer.vanilla.infer import load_predictor
+    from medos_trainer.vanilla.infer import load_ensemble, load_predictor
 
     case = load_case_npz(args.input)
-    predictor = load_predictor(
-        args.checkpoint_dir, overlap=args.overlap,
-        batch_size=args.batch_size, device=args.device,
-    )
+    if args.ensemble_dir is not None:
+        fold_dirs = sorted(
+            d for d in Path(args.ensemble_dir).glob("fold-*")
+            if d.is_dir() and (d / "model.pt").is_file()
+        )
+        if not fold_dirs:
+            print(
+                f"predict: --ensemble-dir {args.ensemble_dir} holds no fold-* "
+                "bundles (looked for fold-*/model.pt); run vanilla-crossval "
+                "there first, or pass --checkpoint-dir for a single bundle",
+                file=sys.stderr,
+            )
+            return 2
+        predictor = load_ensemble(
+            [str(d) for d in fold_dirs], overlap=args.overlap,
+            batch_size=args.batch_size, device=args.device,
+        )
+        report_path = Path(args.ensemble_dir) / "report.json"
+        if report_path.is_file():
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            print("cross-validation aggregate:")
+            print(json.dumps(report.get("aggregate", {}), indent=2))
+    else:
+        predictor = load_predictor(
+            args.checkpoint_dir, overlap=args.overlap,
+            batch_size=args.batch_size, device=args.device,
+        )
     label, probabilities = predictor.predict(case.image)
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -253,6 +283,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--foreground-prob", type=float, default=None,
         help="override the sampler's foreground bias in [0, 1] (plan default 1/3)",
     )
+    vanilla_fit.add_argument(
+        "--cascade-from", default=None, metavar="COARSE_BUNDLE_DIR",
+        help="cascade mode: this coarse bundle predicts every case, its "
+             "foreground probability becomes an extra image channel, and the "
+             "fit trains the fine model on C+1 channels — writes OUT/fine/ "
+             "plus OUT/cascade.json",
+    )
 
     vanilla_crossval = sub.add_parser(
         "vanilla-crossval",
@@ -323,11 +360,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     predict_parser = sub.add_parser(
         "predict",
-        help="run a saved bundle over one case (sliding window)",
+        help="run a saved bundle — or a cross-validation's fold ensemble — "
+             "over one case (sliding window)",
     )
-    predict_parser.add_argument(
-        "--checkpoint-dir", required=True,
+    predict_source = predict_parser.add_mutually_exclusive_group(required=True)
+    predict_source.add_argument(
+        "--checkpoint-dir", default=None,
         help="directory fit wrote (model.pt, net_config.json, fit_plan.json)",
+    )
+    predict_source.add_argument(
+        "--ensemble-dir", default=None, metavar="CROSSVAL_DIR",
+        help="a vanilla-crossval output: every fold-*/ bundle votes, the "
+             "prediction is the mean of their probability maps",
     )
     predict_parser.add_argument("--input", required=True, help="case .npz (image)")
     predict_parser.add_argument("--output", required=True, help="output .npz")
@@ -366,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed, device=args.device,
             resume_from=args.resume_from, max_val_cases=args.max_val_cases,
             use_amp=args.amp, augment_resample=False if args.no_augment_resample else None,
-            foreground_prob=args.foreground_prob,
+            foreground_prob=args.foreground_prob, cascade_from=args.cascade_from,
         )
         print(json.dumps(summary, indent=2))
         return 0

@@ -44,6 +44,36 @@ inside `vanilla-import-nnunet`, pydicom only inside
 For reproducible environments (the training image, CI) `requirements.txt`
 pins the exact development set — torch 2.7.1+cu128 included.
 
+## Multi-GPU (DDP)
+
+A fit runs on one device by default; with more than one GPU (or more than
+one training process), launch the SAME command through `torchrun` — no CLI
+flag changes:
+
+```sh
+torchrun --nproc_per_node=2 -m medos_trainer vanilla-fit \
+    --data cases/ --preset cpu --out bundle/ --device cuda:0
+```
+
+`torchrun` sets `WORLD_SIZE`/`RANK`/`MASTER_ADDR`/`MASTER_PORT`; the trainer
+sees a real world, initializes the process group (NCCL on CUDA, Gloo on
+CPU) and wraps the net in `DistributedDataParallel`. `--device cuda:0` is
+unchanged on purpose: `torchrun` isolates each process's
+`CUDA_VISIBLE_DEVICES`, so every rank's `cuda:0` is its own GPU.
+
+THE CONTRACT UNDER DDP: rank 0 validates, selects checkpoints, owns the
+printed history and writes the bundle (checkpoints carry no `module.`
+prefix and load exactly like a single-process run's); every rank trains.
+Each rank's patch stream is seeded `seed+rank`, so no two ranks draw the
+same patches — the sampler draws WITH REPLACEMENT, so overlapping draws are
+expected and harmless, and the ranks' gradient all-reduce averages the
+differences exactly as a larger single-process batch would. The lr is
+identical on every rank at every epoch boundary: the poly law is a pure
+function of progress, and the plateau law's scheduled value is broadcast
+from rank 0 with the gradients. The CPU/Gloo world is what the test suite's
+real two-process run exercises (`MEDOS_RUN_DDP=1 pytest tests/
+test_distributed.py`).
+
 ## The case format
 
 Everything the framework reads is a directory of `.npz` cases. One case, one
@@ -93,9 +123,12 @@ python -m medos_trainer vanilla-import-dicom --series dicom/ --out case.npz
 # export the bundle's served net to TorchScript and/or ONNX
 python -m medos_trainer export --checkpoint-dir bundle/ --out serving/ --format both
 
-# run a trained bundle over one case, sliding window
+# run a trained bundle over one case, sliding window — or the fold
+# ensemble of a cross-validation output (mean of the folds' probability maps)
 python -m medos_trainer predict --checkpoint-dir bundle/ \
     --input cases/case_000.npz --output pred.npz --overlap 0.5 --batch-size 2
+python -m medos_trainer predict --ensemble-dir crossval/ \
+    --input cases/case_000.npz --output pred.npz
 
 # observe the nine MEDOS_TRAINING_ENVIRONMENT keys (refuses without a GPU
 # unless --allow-cpu)
@@ -134,6 +167,12 @@ plan:
   patches let the net converge to "all background" before it learns the
   structure — pushing toward 1.0 (every patch carries the foreground) is
   the honest answer there; on real corpora the plan default is right.
+- `--cascade-from COARSE_BUNDLE_DIR` switches the fit to cascade mode: the
+  coarse bundle predicts every case, its foreground probability becomes an
+  extra image channel (mask gains a matching all-ones channel), and the
+  fine model is planned and fit with `input_channels=C+1` — the fine bundle
+  and a cascade.json recording the coarse bundle, the channel count and the
+  fit summary land in the output directory.
 
 ### Cross-validation, and what a fold is
 
@@ -145,7 +184,10 @@ deterministic and part of `report.json`: cases in `case_id` order, one
 Same cases, same seed, same folds — an aggregate nobody can reproduce is
 not a result. Each fold leaves a full bundle at `crossval/fold-{k}/` and is
 evaluated on its own fold; the aggregate is the plain mean and sample
-standard deviation of the per-fold best validation scores.
+standard deviation of the per-fold best validation scores. The report also
+carries an `ensemble` row: every fold bundle votes on the union of all
+val cases (each case once, predicted by the full ensemble, the same Dice
+code as everywhere else), with the aggregate and `cases_used` recorded.
 
 ### Evaluation, and what the number means
 
@@ -213,8 +255,10 @@ python trainer/examples/toy_pipeline.py
 | `medos_trainer/vanilla/plan.py` | the fingerprint, the plan derivation, the reasons |
 | `medos_trainer/vanilla/nets.py` | the 3D UNet with deep supervision and its configuration |
 | `medos_trainer/vanilla/losses.py` | the masked segmentation loss |
-| `medos_trainer/vanilla/trainer.py` | the fit loop, AMP, checkpointing, the resume record, the bundle |
-| `medos_trainer/vanilla/infer.py` | sliding-window inference and the bundle predictor |
+| `medos_trainer/vanilla/trainer.py` | the fit loop, AMP, checkpointing, the resume record, the bundle, the plateau/poly lr laws |
+| `medos_trainer/vanilla/distributed.py` | the DDP seam: `maybe_init_distributed`, rank helpers, the world-of-one-is-not-distributed rule |
+| `medos_trainer/vanilla/infer.py` | sliding-window inference, the bundle predictor, the fold ensemble (`EnsemblePredictor`) |
+| `medos_trainer/vanilla/cascade.py` | the coarse→fine hand-off: the coarse foreground probability as an extra image channel |
 | `medos_trainer/vanilla/export.py` | TorchScript/ONNX export of the served net |
 | `medos_trainer/standalone.py` | the autonomous entry: cases in, plan/fit/crossval/evaluate/bundle out, DICOM and NIfTI importers |
 | `medos_trainer/environment.py` | the nine-key environment declaration, observed |
@@ -230,19 +274,14 @@ importer alone — nibabel or pydicom.
 
 The honest list, so nobody plans against a feature that does not exist:
 
-- **Multi-GPU training.** A fit runs on one device; there is no
-  data-parallel wrapper. The GPU story is "the biggest single device you
-  have", as nnU-Net's was for years.
-- **Cascades and ensembles beyond cross-validation.** The folds of
-  `vanilla-crossval` are independent models with an aggregated report;
-  there is no cascade (a second stage at higher resolution), no model
-  soup, no test-time augmentation averaging.
 - **PyPI publication.** Install from this tree (`pip install -e .`). The
   name is reserved, the packaging metadata is real, the upload is a
   decision about support surface that has not been made.
 - **Region-based labels.** Classes are mutually exclusive (softmax + one
   hot); overlapping or hierarchical label sets would need a different
   head and a different loss.
+- **Test-time augmentation, model soups.** The ensemble is a plain mean of
+  fold probability maps; there is no TTA loop and no weight averaging.
 
 ## The environment declaration, and the GPU
 
@@ -281,12 +320,15 @@ The suite covers the vanilla stack end to end (`test_vanilla_plan.py`,
 `test_vanilla_nets.py`, `test_vanilla_data.py`, `test_vanilla_infer.py`,
 `test_multichannel.py`, `test_augment_resample.py`), the autonomous entry
 (`test_standalone.py`, `test_crossval.py`, `test_evaluate.py`,
-`test_resume.py`), serving (`test_export.py`), the importers
-(`test_dicom_import.py`, plus the NIfTI round-trip in `test_standalone.py`)
-and the metric utilities (`test_detection.py`, `test_evidence.py`,
-`test_overlap.py`). It needs torch, numpy and scipy; the nibabel and
-pydicom importer tests skip when their package is absent, and the ONNX
-equivalence test skips when onnxruntime is absent.
+`test_resume.py`), the newer capabilities (`test_ensemble.py`,
+`test_cascade.py`, `test_lr_schedule.py`, `test_distributed.py` — the real
+two-process DDP run is opt-in via `MEDOS_RUN_DDP=1`), serving
+(`test_export.py`), the importers (`test_dicom_import.py`, plus the NIfTI
+round-trip in `test_standalone.py`) and the metric utilities
+(`test_detection.py`, `test_evidence.py`, `test_overlap.py`). It needs
+torch, numpy and scipy; the nibabel and pydicom importer tests skip when
+their package is absent, and the ONNX equivalence test skips when
+onnxruntime is absent.
 
 **The rule for this directory: a test here may read `trainer/` and nothing
 else.** What the rest of the monorepo asserts about this tree — that it

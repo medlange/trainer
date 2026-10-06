@@ -111,6 +111,11 @@ def test_imports_are_vanilla() -> None:
                "__future__", "math", "enum", "pathlib", "collections",
                "collections.abc", "functools", "itertools", "json", "time",
                "copy", "abc", "io", "statistics",
+               # os: vanilla/distributed.py reads WORLD_SIZE/RANK/MASTER_ADDR
+               # to decide whether a DDP world exists. Stdlib, same family as
+               # pathlib/json/time above — the gate keeps nnU-Net/MONAI out,
+               # not the standard library.
+               "os",
                # scipy is THIS TREE'S OWN numeric dependency, not a framework:
                # the resampling augmentation (data.py) and the detection/
                # overlap metric modules already use it. The gate's purpose is
