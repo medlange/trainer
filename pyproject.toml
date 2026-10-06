@@ -38,6 +38,15 @@ nifti = ["nibabel"]
 # DICOM series import (`vanilla-import-dicom`) — imported lazily inside the importer.
 dicom = ["pydicom"]
 
+[tool.pytest.ini_options]
+# The suite imports `medos_trainer` from the source tree without an install
+# step (CI installs only the pinned requirements + pytest). Pinning pythonpath
+# keeps `pytest tests -q` working exactly the same installed or not — without
+# this, whether the repo root lands on sys.path depends on pytest's invocation
+# shape, which is how a green local run went red in CI.
+pythonpath = ["."]
+testpaths = ["tests"]
+
 [project.scripts]
 medos-trainer = "medos_trainer.__main__:main"
 
