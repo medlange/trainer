@@ -43,9 +43,14 @@ from medos_trainer.vanilla.data import Case
 from medos_trainer.vanilla.nets import UNetConfig
 from medos_trainer.vanilla.trainer import FitPlan
 
-#: The physical patch the planner aims for, in millimetres,
-#: (through-plane, in-plane, in-plane). A net sees enough anatomy to tell
-#: a lesion from a vessel by context, not by absolute intensity.
+#: The DEFAULT physical patch target, in millimetres, (through-plane,
+#: in-plane, in-plane) — used by presets that do not name their own (today
+#: the cpu preset). What counts as "enough anatomy to tell a lesion from a
+#: vessel by context" is a function of affordable context, so GPU presets
+#: override this with nnU-Net-class targets (see VramPreset). The PulmoAI
+#: benchmark found a one-size 12/20/20 mm target handed a 32 GB card an
+#: eight-times-smaller patch than nnU-Net plans on the same sub-millimetre
+#: CT — that is why this is a preset property, not a global.
 TARGET_PATCH_MM: tuple[float, float, float] = (12.0, 20.0, 20.0)
 
 #: Patch axes are rounded to this multiple: five stages pool 16×, and a
@@ -88,21 +93,28 @@ class Fingerprint:
 class VramPreset:
     """The one place "which GPU" enters the plan. `voxel_budget` caps the
     patch's voxel count; `features`/`batch_size` are honest CPU/GPU floors,
+    `target_patch_mm` is the PHYSICAL context the preset can afford (nnU-Net
+    plans ~90–130 mm of context on sub-millimetre CT; a one-size 12/20/20 mm
+    target starves a 32 GB card of exactly the context it bought the VRAM
+    for — found by the PulmoAI benchmark, see docs/benchmark-pulmo-*.md),
     and the plan records the preset name so a card can say what ran."""
 
     name: str
     features: tuple[int, ...]
     batch_size: int
     voxel_budget: int
+    target_patch_mm: tuple[float, float, float] = TARGET_PATCH_MM
 
 
 PRESETS: dict[str, VramPreset] = {
     "cpu": VramPreset("cpu", features=(16, 32, 64, 128), batch_size=2,
                       voxel_budget=96 * 96 * 96),
     "small": VramPreset("small", features=(32, 64, 128, 256, 320), batch_size=2,
-                        voxel_budget=128 * 128 * 128),
+                        voxel_budget=128 * 128 * 128,
+                        target_patch_mm=(40.0, 80.0, 80.0)),
     "large": VramPreset("large", features=(32, 64, 128, 256, 320), batch_size=4,
-                        voxel_budget=160 * 160 * 112),
+                        voxel_budget=160 * 160 * 112,
+                        target_patch_mm=(80.0, 140.0, 140.0)),
 }
 
 
@@ -207,12 +219,18 @@ def plan_from_fingerprint(
 
     spacing = fingerprint.median_spacing
     # The through-plane axis of a medical volume is shapes[0]/spacing[0].
-    # TARGET_PATCH_MM is (through-plane, in-plane, in-plane); medical
+    # target_patch_mm is (through-plane, in-plane, in-plane); medical
     # convention orders spacing the same way, so the pairing is direct.
-    voxel_patch = [t / s for t, s in zip(TARGET_PATCH_MM, spacing)]
+    # THE TARGET IS A PROPERTY OF THE PRESET, not a global: what counts as
+    # "enough context" is affordable context (the benchmark found a global
+    # 12/20/20 mm gives a 5090 an eight-times-smaller patch than nnU-Net
+    # plans on the same data).
+    target = p.target_patch_mm
+    voxel_patch = [t / s for t, s in zip(target, spacing)]
     reasons = [
-        f"median spacing {spacing} mm -> target patch {TARGET_PATCH_MM} mm "
-        f"is {tuple(round(v, 1) for v in voxel_patch)} voxels before rounding",
+        f"median spacing {spacing} mm -> preset {p.name} target patch "
+        f"{target} mm is {tuple(round(v, 1) for v in voxel_patch)} voxels "
+        "before rounding",
     ]
 
     # CAP the voxel budget: high-resolution isotropic data makes enormous

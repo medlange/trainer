@@ -130,7 +130,22 @@ class PatchSampler:
 
 def augment_mirror_rotate(patch: Patch, rng: np.random.Generator) -> Patch:
     """Mirror any subset of axes, then rotate 90 degrees around the I axis.
-    Statistics-preserving: no voxel value is ever invented."""
+
+    THE ROTATION IS CONDITIONAL ON J == I. ``np.rot90`` on the (J, I) plane
+    swaps those two extents: for a square in-plane patch the shape is
+    unchanged, but the plan sizes patches PHYSICALLY (TARGET_PATCH_MM is
+    through-plane x in-plane x in-plane), so K routinely differs from J and I
+    — an unconditional rotation emitted two different patch shapes into one
+    batch and ``make_batch`` refused the stack (found by the PulmoAI
+    benchmark; see trainer/docs/benchmark-pulmo-2026-10-06.md). The plan's
+    in-plane pair is (20 mm, 20 mm), so every plan-derived patch keeps
+    J == I and the rotation still applies exactly where intended; a
+    hand-written non-square plan loses the rotation but never the batch.
+    Mirrors are per-axis reflections — they never change extents and apply
+    unconditionally.
+
+    Statistics-preserving: no voxel value is ever invented.
+    """
     image, label, mask = patch.image, patch.label, patch.mask
     for axis in (1, 2, 3):
         if rng.random() < 0.5:
@@ -139,13 +154,14 @@ def augment_mirror_rotate(patch: Patch, rng: np.random.Generator) -> Patch:
             label = np.flip(label, axis=axis - 1)
             if mask is not None:
                 mask = np.flip(mask, axis=axis - 1)
-    k = int(rng.integers(0, 4))
-    if k:
-        # np.rot90 acts on the last two axes; for the image keep C first.
-        image = np.rot90(image, k, axes=(2, 3))
-        label = np.rot90(label, k, axes=(1, 2))
-        if mask is not None:
-            mask = np.rot90(mask, k, axes=(2, 3))
+    if patch.image.shape[2] == patch.image.shape[3]:
+        k = int(rng.integers(0, 4))
+        if k:
+            # np.rot90 acts on the last two axes; for the image keep C first.
+            image = np.rot90(image, k, axes=(2, 3))
+            label = np.rot90(label, k, axes=(1, 2))
+            if mask is not None:
+                mask = np.rot90(mask, k, axes=(2, 3))
     return Patch(
         image=np.ascontiguousarray(image),
         label=np.ascontiguousarray(label),

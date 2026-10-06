@@ -90,6 +90,33 @@ def test_augment_preserves_shapes_and_values() -> None:
     assert np.isclose(np.sort(patch.image.ravel()), np.sort(aug.image.ravel())).all()
 
 
+def test_augment_rotation_skipped_when_in_plane_is_not_square() -> None:
+    """REAL-DATA REGRESSION, found by the PulmoAI benchmark: the plan sizes
+    patches physically, so (K, J, I) = (16, 32, 16) is a legal planned patch;
+    an unconditional 90-degree rotation then swapped the J/I extents, mixed
+    (1,16,32,16) with (1,16,16,32) inside one batch, and `make_batch` raised.
+    Mirrors never change extents and must still apply; the rotation is owed
+    only to square in-plane patches; the batch the old code refused stacks."""
+    case = _toy_cases(1, seed=11)[0]
+    sampler = PatchSampler((8, 16, 8), foreground_prob=1.0)
+    sources = [sampler.sample(case, np.random.default_rng(s)) for s in range(8)]
+    augmented = [
+        augment_mirror_rotate(p, np.random.default_rng(100 + s))
+        for s, p in enumerate(sources)
+    ]
+    for source, aug in zip(sources, augmented):
+        assert aug.image.shape == (1, 8, 16, 8)
+        assert aug.label.shape == (8, 16, 8)
+        assert aug.mask.shape == (1, 8, 16, 8)
+        # mirrors/rotations permute voxels; the value multiset is identical.
+        assert np.isclose(
+            np.sort(source.image.ravel()), np.sort(aug.image.ravel())
+        ).all()
+    images, labels, _ = make_batch(augmented)
+    assert images.shape == (8, 1, 8, 16, 8)
+    assert labels.shape == (8, 8, 16, 8)
+
+
 def test_case_round_trips_through_npz(tmp_path) -> None:
     case = _toy_cases(1, seed=9)[0]
     path = tmp_path / "case.npz"

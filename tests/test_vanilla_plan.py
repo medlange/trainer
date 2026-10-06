@@ -95,6 +95,24 @@ def test_plan_caps_the_voxel_budget_and_says_so() -> None:
     assert plan.preset.name == "tiny"
 
 
+def test_gpu_presets_plan_nnunet_class_context() -> None:
+    """THE PULMOAI BENCHMARK FINDING, PINNED. On sub-millimetre CT
+    (spacing ~0.7 mm), a one-size 12/20/20 mm target plans a (16, 32, 32)
+    patch while nnU-Net plans ~90–130 mm of context per axis — 8x less
+    anatomy per forward pass. GPU presets must name their own physical
+    target; the voxel budget cap keeps it affordable."""
+    fp = collect_fingerprint(_cases(spacing=(0.7, 0.7, 0.7)))
+    plan = plan_from_fingerprint(fp, "large")
+    patch_mm = [p * s for p, s in zip(plan.patch_size, (0.7, 0.7, 0.7))]
+    assert min(patch_mm) > 55.0, (
+        f"preset large plans only {tuple(round(v) for v in patch_mm)} mm of "
+        f"context (patch {plan.patch_size}) — back to starving GPUs"
+    )
+    count = plan.patch_size[0] * plan.patch_size[1] * plan.patch_size[2]
+    assert count <= PRESETS["large"].voxel_budget * 1.5
+    assert any("preset large" in r for r in plan.reasons)
+
+
 def test_plan_unknown_preset_is_a_lookup_error_with_choices() -> None:
     fp = collect_fingerprint(_cases())
     with pytest.raises(ValueError, match="unknown preset"):
