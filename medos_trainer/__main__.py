@@ -260,6 +260,10 @@ def build_parser() -> argparse.ArgumentParser:
     vanilla_fit.add_argument("--epochs", type=int, default=None,
                            help="override the plan's epochs (smoke runs)")
     vanilla_fit.add_argument("--steps-per-epoch", type=int, default=None)
+    vanilla_fit.add_argument("--batch-size", type=int, default=None,
+                             help="override the preset's batch — the lever for "
+                                  "shared GPUs where the planned batch OOMs "
+                                  "beside another tenant's processes")
     vanilla_fit.add_argument("--seed", type=int, default=0)
     vanilla_fit.add_argument("--device", default="cpu")
     vanilla_fit.add_argument(
@@ -320,6 +324,7 @@ def build_parser() -> argparse.ArgumentParser:
     vanilla_evaluate.add_argument("--data", required=True, help="directory of .npz cases")
     vanilla_evaluate.add_argument("--out", required=True, help="report JSON path")
     vanilla_evaluate.add_argument("--max-cases", type=int, default=None)
+    vanilla_evaluate.add_argument("--device", default="cpu")
 
     vanilla_import = sub.add_parser(
         "vanilla-import-nnunet",
@@ -410,7 +415,8 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed, device=args.device,
             resume_from=args.resume_from, max_val_cases=args.max_val_cases,
             use_amp=args.amp, augment_resample=False if args.no_augment_resample else None,
-            foreground_prob=args.foreground_prob, cascade_from=args.cascade_from,
+            foreground_prob=args.foreground_prob, batch_size=args.batch_size,
+            cascade_from=args.cascade_from,
         )
         print(json.dumps(summary, indent=2))
         return 0
@@ -430,7 +436,8 @@ def main(argv: list[str] | None = None) -> int:
         from medos_trainer.standalone import evaluate_command
 
         report = evaluate_command(
-            args.checkpoint_dir, args.data, args.out, max_cases=args.max_cases
+            args.checkpoint_dir, args.data, args.out, max_cases=args.max_cases,
+            device=args.device,
         )
         print(json.dumps(report["aggregate"], indent=2))
         print(f"wrote {args.out}")

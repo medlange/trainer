@@ -118,3 +118,22 @@ def test_import_nnunet_dataset_names_the_missing_label(tmp_path) -> None:
              str(images / "lonely.nii.gz"))
     with pytest.raises(ValueError, match="lonely"):
         import_nnunet_dataset(images, labels, tmp_path / "out")
+
+
+def test_fit_command_batch_size_override(tmp_path) -> None:
+    cases = _write_cases(tmp_path)
+    summary_bundle = tmp_path / "bundle"
+    summary = fit_command(cases, "cpu", summary_bundle, epochs=1, steps_per_epoch=1,
+                          batch_size=1)
+    assert (summary_bundle / "model.pt").is_file()
+    # the override is recorded in the run summary — fit_plan.json carries the
+    # patch size only, by design (inference does not need the training batch)
+    assert summary["batch_size"] == 1
+    assert summary["preset"] == "cpu"
+
+
+def test_fit_command_batch_size_refuses_zero(tmp_path) -> None:
+    cases = _write_cases(tmp_path)
+    with pytest.raises(ValueError, match="positive integer"):
+        fit_command(cases, "cpu", tmp_path / "bundle", epochs=1, steps_per_epoch=1,
+                    batch_size=0)

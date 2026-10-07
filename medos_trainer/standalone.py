@@ -316,6 +316,7 @@ def evaluate_command(
     data_dir: str | Path,
     out: str | Path,
     max_cases: int | None = None,
+    device: str = "cpu",
 ) -> dict:
     """A bundle's per-case and aggregate Dice over a cases directory, as JSON.
 
@@ -326,8 +327,8 @@ def evaluate_command(
     from medos_trainer.vanilla.infer import load_predictor
 
     cases = load_cases_dir(data_dir)
-    return evaluate_predictor(load_predictor(checkpoint_dir), cases, out=out,
-                              max_cases=max_cases)
+    return evaluate_predictor(load_predictor(checkpoint_dir, device=device),
+                              cases, out=out, max_cases=max_cases)
 
 
 def fit_command(
@@ -344,6 +345,7 @@ def fit_command(
     use_amp: bool = False,
     augment_resample: bool | None = None,
     foreground_prob: float | None = None,
+    batch_size: int | None = None,
     cascade_from: str | Path | None = None,
 ) -> dict:
     """The whole autonomous pipeline: data -> fingerprint -> plan -> fit -> bundle.
@@ -368,6 +370,11 @@ def fit_command(
     extra image channel, and the fine model is planned and fit with
     `input_channels=C+1` — the whole thing delegated to
     `fit_cascade_command`, which writes `out/fine/` + `out/cascade.json`.
+
+    `batch_size` OVERRIDES the preset's batch: on a shared GPU the plan's
+    batch (4 on `large`) may not fit beside another tenant's processes, and
+    halving the batch is the honest lever — found on the PulmoAI benchmark
+    box, where both cards carried neighbours and batch 4 OOM'd mid-run.
     """
     if cascade_from is not None:
         return fit_cascade_command(
@@ -383,6 +390,10 @@ def fit_command(
 
     cases = load_cases_dir(data_dir)
     plan = _planned_run(cases, preset, epochs, steps_per_epoch, foreground_prob)
+    if batch_size is not None:
+        if batch_size < 1:
+            raise ValueError(f"batch_size is a positive integer, got {batch_size}")
+        plan = replace(plan, preset=replace(plan.preset, batch_size=batch_size))
     fit_plan = plan.fit_plan()
     if augment_resample is not None or use_amp:
         fit_plan = replace(
@@ -414,6 +425,7 @@ def fit_command(
     return {"best_val_masked_dice_loss": result["best_val_masked_dice_loss"],
             "patch_size": list(plan.patch_size),
             "preset": plan.preset.name,
+            "batch_size": plan.preset.batch_size,
             "reasons": list(plan.reasons),
             "history": result["history"],
             "evaluation": evaluation}
