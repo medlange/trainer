@@ -7,7 +7,8 @@ THE SUBCOMMANDS, AND NOTHING ELSE
                              derived plan (patch size, batch size, schedule) with the
                              reasons attached
     vanilla-fit              plan + train + write an inference bundle, no platform:
-                             cases in, `model.pt` + `net_config.json` + `fit_plan.json` out
+                             cases in, `model.pt` + `net_config.json` + `fit_plan.json`
+                             + `preprocess.json` out
     vanilla-crossval         k-fold cross-validation: one plan, per-fold refits,
                              `fold-{k}/` bundles and a `report.json` with the fold
                              assignment and the aggregate
@@ -117,7 +118,18 @@ def _predict(args: argparse.Namespace) -> int:
     from medos_trainer.vanilla.data import load_case_npz
     from medos_trainer.vanilla.infer import load_ensemble, load_predictor
 
-    case = load_case_npz(args.input)
+    # The bundle knows its TARGET spacing; only the caller knows the grid the
+    # incoming volume is defined on. Our importers write a `spacing_mm`
+    # member into the case npz — read it here (load_cases_dir does exactly
+    # this) so a bundle with preprocessing can resample up and back, and a
+    # bundle without one can ignore it.
+    with np.load(args.input) as z:
+        spacing = (
+            tuple(float(v) for v in z["spacing_mm"])
+            if "spacing_mm" in z.files
+            else (1.0, 1.0, 1.0)
+        )
+    case = load_case_npz(args.input, spacing_mm=spacing)
     if args.ensemble_dir is not None:
         fold_dirs = sorted(
             d for d in Path(args.ensemble_dir).glob("fold-*")
@@ -145,7 +157,7 @@ def _predict(args: argparse.Namespace) -> int:
             args.checkpoint_dir, overlap=args.overlap,
             batch_size=args.batch_size, device=args.device,
         )
-    label, probabilities = predictor.predict(case.image)
+    label, probabilities = predictor.predict(case.image, spacing_mm=case.spacing_mm)
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(out, label=label, probabilities=probabilities)

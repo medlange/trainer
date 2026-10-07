@@ -121,3 +121,21 @@ Fingerprint foreground-intensity statistics + dataset z-score normalisation;
 resampling to median spacing in the pipeline; dataloader workers for the
 patch pipeline; a 100-epoch rerun on the same split to separate
 "preprocessing gap" from "convergence gap".
+
+## W16 addendum (2026-10-07): preprocessing parity shipped
+
+The first two W16 items are implemented: the fingerprint collects
+foreground-intensity statistics (global mean/std over labelled foreground
+voxels, channel 0), the plan turns them plus the median spacing into the
+preprocessing decision (recorded in `reasons`), `vanilla-fit` resamples
+and z-scores the training corpus, and the bundle carries the decision as
+`preprocess.json` — replayed transparently at predict time, including
+the one-directional resampling back onto the caller's own grid.
+
+| | nnU-Net v2 | Medlange Trainer |
+|---|---|---|
+| Foreground Dice on held-out val (4 cases, one evaluator) | **0.764** | **pending rerun** |
+
+Numbers pending rerun on the benchmark box (same split, same budget:
+`vanilla-fit --preset large --epochs 5 --steps-per-epoch 250 --seed 0`,
+predicted via `vanilla-evaluate --device cuda:0`).

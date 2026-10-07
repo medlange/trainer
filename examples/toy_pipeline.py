@@ -25,7 +25,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def make_toy_corpus(out: Path, n: int = 6, shape: tuple[int, int, int] = (24, 24, 24)) -> None:
-    """Bright sphere = class 1, background -600 HU-ish; a corner is unlabelled."""
+    """Bright sphere = class 1, background -600 HU-ish; a corner is unlabelled.
+
+    The foreground carries noise: a perfectly constant sphere would have
+    zero intensity spread, and the plan would refuse to normalize it."""
     rng = np.random.default_rng(0)
     for i in range(n):
         image = rng.normal(-600.0, 50.0, (1, *shape)).astype(np.float32)
@@ -33,7 +36,7 @@ def make_toy_corpus(out: Path, n: int = 6, shape: tuple[int, int, int] = (24, 24
         c = rng.integers(8, 16, size=3)
         kk, jj, ii = np.ogrid[: shape[0], : shape[1], : shape[2]]
         ball = (kk - c[0]) ** 2 + (jj - c[1]) ** 2 + (ii - c[2]) ** 2 <= 5**2
-        image[0][ball] = 200.0
+        image[0][ball] = 200.0 + rng.normal(0.0, 25.0, int(ball.sum()))
         label[ball] = 1
         mask = np.ones_like(image)
         mask[:, : shape[0] // 2, : shape[1] // 2, : shape[2] // 2] = 0.0
@@ -56,18 +59,21 @@ def main() -> None:
         print(f"  because {reason}")
 
     summary = fit_command(cases, "cpu", work / "bundle",
-                          epochs=6, steps_per_epoch=8, seed=0,
+                          epochs=12, steps_per_epoch=16, seed=0,
                           # A six-case toy has no background variety to speak
                           # of: two background patches in three would let the
                           # net converge to "all background" long before it
                           # ever learns the ball. On a corpus this small,
                           # every sampled patch should carry the structure.
+                          # The step count is the smallest that shows real
+                          # learning on this toy — the printed held-out dice
+                          # is the example's point.
                           foreground_prob=1.0)
     print("fit:", json.dumps(summary["best_val_masked_dice_loss"]), "best val masked dice")
 
     predictor = load_predictor(work / "bundle")
     case = load_case_npz(sorted(cases.glob("*.npz"))[-1])
-    label, _ = predictor.predict(case.image)
+    label, _ = predictor.predict(case.image, spacing_mm=case.spacing_mm)
     fg = (case.label == 1) & (case.mask[0] > 0)
     dice = 2.0 * float((label == 1)[fg].sum()) / float((label == 1).sum() + fg.sum())
     print(f"held-out dice: {dice:.3f} (work dir: {work})")

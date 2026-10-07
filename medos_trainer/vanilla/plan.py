@@ -12,8 +12,11 @@ frozen dataclasses:
 
 WHAT THE FINGERPRINT HOLDS: median spacing and median shape (the two
 numbers every downstream decision reads), the class census over LABELLED
-voxels only (an unlabelled voxel is not evidence about rarity), and the
-labelled fraction (how much of a typical case is actually supervised).
+voxels only (an unlabelled voxel is not evidence about rarity), the
+labelled fraction (how much of a typical case is actually supervised),
+and the foreground intensity statistics (global mean/std over LABELLED
+FOREGROUND voxels of channel 0 — the z-score the preprocessor will apply;
+single-channel CT is the supported modality).
 
 WHAT THE PLAN DECIDES, and the reasoning the audit can quote:
 
@@ -39,8 +42,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from statistics import median
 
+import numpy as np
 from medos_trainer.vanilla.data import Case
 from medos_trainer.vanilla.nets import UNetConfig
+from medos_trainer.vanilla.preprocess import IntensityNorm
 from medos_trainer.vanilla.trainer import FitPlan
 
 #: The DEFAULT physical patch target, in millimetres, (through-plane,
@@ -74,6 +79,14 @@ class Fingerprint:
     median_spacing: tuple[float, float, float]
     class_counts: tuple[tuple[int, int], ...]  # (class, labelled voxels)
     labelled_fraction: float
+    #: Global mean/std of channel 0 over voxels that are labelled AND
+    #: foreground (label > 0, mask-respected like the census) — the
+    #: z-score the preprocessor applies. 0.0/0.0 when the corpus carries
+    #: no foreground at all; the plan REFUSES that corpus at
+    #: `PlannedRun.normalization`, because a corpus without foreground has
+    #: no business training.
+    foreground_mean: float
+    foreground_std: float
 
     @property
     def num_classes(self) -> int:
@@ -158,6 +171,37 @@ class PlannedRun:
             augment_resample=True,
         )
 
+    @property
+    def target_spacing(self) -> tuple[float, float, float]:
+        """The resampling target: the corpus's own median spacing. The plan
+        decides it; `fit_command` resamples training cases forward onto it
+        and the bundle's predictor resamples incoming images up to it and
+        the probabilities back down, transparently."""
+        return self.fingerprint.median_spacing
+
+    @property
+    def normalization(self) -> IntensityNorm:
+        """The z-score the fingerprint's foreground statistics define.
+
+        REFUSED AT PLAN TIME, NAMED, when the corpus has no foreground
+        intensity spread: a corpus without foreground has no business
+        training, and a normalization that silently divides by zero would
+        produce a worse failure much further from its cause.
+        """
+        if not self.fingerprint.foreground_std > 1e-8:
+            raise ValueError(
+                "no intensity normalization: the corpus's foreground "
+                f"intensity spread is {self.fingerprint.foreground_std!r} "
+                "(foreground_mean="
+                f"{self.fingerprint.foreground_mean!r}) — a corpus without "
+                "labelled foreground has nothing to segment and no z-score "
+                "to train with"
+            )
+        return IntensityNorm(
+            mean=self.fingerprint.foreground_mean,
+            std=self.fingerprint.foreground_std,
+        )
+
 
 def collect_fingerprint(cases: list[Case]) -> Fingerprint:
     """The census over the training partition, one pass, no caching subtleties."""
@@ -168,6 +212,9 @@ def collect_fingerprint(cases: list[Case]) -> Fingerprint:
     counts: dict[int, int] = {}
     labelled = 0
     voxels = 0
+    fg_sum = 0.0
+    fg_sq_sum = 0.0
+    fg_count = 0
     for case in cases:
         label = case.label
         if case.mask is not None:
@@ -186,8 +233,27 @@ def collect_fingerprint(cases: list[Case]) -> Fingerprint:
             n = int(region.sum())
             if n:
                 counts[cls] = counts.get(cls, 0) + n
+        # Foreground intensity statistics: channel 0 only (single-channel
+        # CT is the supported modality), over voxels that are foreground
+        # AND labelled, exactly the census's evidence rule.
+        foreground = label > 0
+        if supervised is not None:
+            foreground = foreground & supervised
+        if foreground.any():
+            values = case.image[0][foreground]
+            fg_sum += float(values.sum(dtype=np.float64))
+            fg_sq_sum += float(np.square(values, dtype=np.float64).sum())
+            fg_count += int(values.size)
     if not counts:
         raise ValueError("the corpus has no labelled voxels at all")
+    if fg_count:
+        fg_mean = fg_sum / fg_count
+        # E[x^2] - E[x]^2 in float64; clipped at 0 because catastrophic
+        # cancellation can leave a breath below zero on a constant field.
+        variance = max(fg_sq_sum / fg_count - fg_mean * fg_mean, 0.0)
+        fg_std = variance ** 0.5
+    else:
+        fg_mean, fg_std = 0.0, 0.0
     return Fingerprint(
         shapes=shapes,
         spacings=spacings,
@@ -195,6 +261,8 @@ def collect_fingerprint(cases: list[Case]) -> Fingerprint:
         median_spacing=tuple(float(median(axis)) for axis in zip(*spacings)),
         class_counts=tuple(sorted(counts.items())),
         labelled_fraction=labelled / voxels,
+        foreground_mean=float(fg_mean),
+        foreground_std=float(fg_std),
     )
 
 
@@ -255,6 +323,19 @@ def plan_from_fingerprint(
     reasons.append(
         f"through-plane spacing {spacing[0]:.2f} vs in-plane {in_plane:.2f} mm "
         f"-> stem_stride {stem}",
+    )
+
+    # PREPROCESSING, the second half of what the plan decides (the
+    # benchmark's W16): the median spacing is the resampling target and
+    # the foreground intensity census is the z-score. The numbers are
+    # recorded here because a plan a reviewer cannot interrogate is a
+    # number pulled from the air.
+    reasons.append(
+        f"foreground intensity over labelled foreground voxels (channel 0): "
+        f"mean {fingerprint.foreground_mean:.2f}, std "
+        f"{fingerprint.foreground_std:.2f} -> z-score normalization; "
+        f"median spacing {spacing} mm is the resampling target (fit "
+        "resamples forward, predict resamples back)"
     )
 
     return PlannedRun(

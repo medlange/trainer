@@ -47,7 +47,11 @@ def build_cascade_cases(
     num_classes = int(coarse_predictor.net.config.num_classes)
     out = []
     for case in cases:
-        _, probs = coarse_predictor.predict(case.image)
+        # The spacing comes from the case: a coarse predictor with a
+        # preprocessing record resamples the image up to its target grid and
+        # returns the probabilities BACK on this grid, so the guide channel
+        # this function appends already aligns with the case's own voxels.
+        _, probs = coarse_predictor.predict(case.image, spacing_mm=case.spacing_mm)
         guide = probs[1] if num_classes == 2 else probs[1:].max(axis=0)
         image = np.concatenate(
             [case.image, guide.astype(np.float32)[None]], axis=0

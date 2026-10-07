@@ -263,7 +263,11 @@ def _dice_rows(
         )
     rows = []
     for case in selected:
-        label, _ = predictor.predict(case.image)
+        # The spacing is the caller's to give: a predictor with a
+        # preprocessing record resamples the image to its target grid and
+        # returns the label on THIS case's grid, whatever the bundle's
+        # training spacing was; one without a record ignores the argument.
+        label, _ = predictor.predict(case.image, spacing_mm=case.spacing_mm)
         supervised = (
             np.ones(case.label.shape, dtype=bool)
             if case.mask is None
@@ -375,6 +379,15 @@ def fit_command(
     batch (4 on `large`) may not fit beside another tenant's processes, and
     halving the batch is the honest lever — found on the PulmoAI benchmark
     box, where both cards carried neighbours and batch 4 OOM'd mid-run.
+
+    PREPROCESSING (the benchmark's W16): after the plan, every case is
+    resampled to the plan's target spacing (the fingerprint's median
+    spacing) and z-scored with the fingerprint's foreground intensity
+    statistics — `vanilla.preprocess.preprocess_cases` — and ONLY THEN is
+    the corpus split and fit. The bundle carries the decision as
+    `preprocess.json`, the fit summary records it under `preprocessing`,
+    and a corpus whose foreground has no intensity spread is refused here,
+    at plan time, with the reason named.
     """
     if cascade_from is not None:
         return fit_cascade_command(
@@ -386,6 +399,7 @@ def fit_command(
     from medos_trainer.vanilla.distributed import get_rank
     from medos_trainer.vanilla.infer import load_predictor
     from medos_trainer.vanilla.nets import build_unet
+    from medos_trainer.vanilla.preprocess import Preprocessing, preprocess_cases
     from medos_trainer.vanilla.trainer import VanillaTrainer
 
     cases = load_cases_dir(data_dir)
@@ -394,6 +408,17 @@ def fit_command(
         if batch_size < 1:
             raise ValueError(f"batch_size is a positive integer, got {batch_size}")
         plan = replace(plan, preset=replace(plan.preset, batch_size=batch_size))
+    preprocessing = Preprocessing(
+        target_spacing=plan.target_spacing, normalization=plan.normalization
+    )
+    split = max(1, len(cases) // 5)
+    # The trainer sees the corpus AS THE NET WILL SEE IT; the post-fit
+    # evaluation sees it AS IT IS — the raw val cases, with the bundle's
+    # preprocessing applied by the predictor itself, which is exactly the
+    # code path `vanilla-evaluate` drives later.
+    train = preprocess_cases(cases[split:], preprocessing)
+    val = preprocess_cases(cases[:split], preprocessing)
+    val_raw = cases[:split]
     fit_plan = plan.fit_plan()
     if augment_resample is not None or use_amp:
         fit_plan = replace(
@@ -415,17 +440,27 @@ def fit_command(
         )
         resume = {**state,
                   "best_val_masked_dice_loss": float(record["val_masked_dice_loss"])}
-    split = max(1, len(cases) // 5)
-    train, val = cases[split:], cases[:split]
     # UNDER DDP each rank draws its own patch stream: seed+rank. Single
     # process, get_rank() is 0 and the seed is exactly what it always was.
     result = trainer.fit(train, val, np.random.default_rng(seed + get_rank()),
                          out_dir=out_dir, resume=resume)
-    evaluation = _dice_rows(load_predictor(out_dir), val, max_cases=max_val_cases)
+    # THE BUNDLE CARRIES THE PREPROCESSING: the predictor this bundle loads
+    # into must replay the resampling and z-score on every incoming image,
+    # so the decision lands beside the weights it was made for. (The trainer
+    # wrote the bundle during the fit; this adds the one file it cannot
+    # know about.)
+    bundle_dir = Path(out_dir)
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "preprocess.json").write_text(
+        json.dumps(preprocessing.to_dict(), indent=2) + "\n", encoding="utf-8"
+    )
+    evaluation = _dice_rows(load_predictor(out_dir), val_raw,
+                            max_cases=max_val_cases)
     return {"best_val_masked_dice_loss": result["best_val_masked_dice_loss"],
             "patch_size": list(plan.patch_size),
             "preset": plan.preset.name,
             "batch_size": plan.preset.batch_size,
+            "preprocessing": preprocessing.to_dict(),
             "reasons": list(plan.reasons),
             "history": result["history"],
             "evaluation": evaluation}

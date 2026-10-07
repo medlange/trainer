@@ -101,7 +101,7 @@ after a pip install) — ten of them, and nothing else:
 python -m medos_trainer vanilla-plan --data cases/ --preset cpu --out plan.json
 
 # plan + train + write an inference bundle (model.pt, net_config.json,
-# fit_plan.json, checkpoint.json, training_state.pt) + evaluate it
+# fit_plan.json, checkpoint.json, training_state.pt, preprocess.json) + evaluate it
 python -m medos_trainer vanilla-fit --data cases/ --preset cpu --out bundle/ \
     --epochs 50 --steps-per-epoch 100 --seed 0 --device cpu
 
@@ -174,6 +174,36 @@ plan:
   and a cascade.json recording the coarse bundle, the channel count and the
   fit summary land in the output directory.
 
+### Preprocessing: what the plan decides about the pixels
+
+The fingerprint collects two more census numbers than the geometry, and
+the plan turns both into preprocessing — the gap the PulmoAI benchmark
+measured (nnU-Net 0.764 vs 0.000 foreground Dice with neither in place;
+see `docs/benchmark-pulmo-2026-10-07.md`):
+
+- the corpus's **median spacing is the resampling target**. `vanilla-fit`
+  resamples every training case whose spacing differs onto the target
+  grid (image cubic, label and mask nearest — a fractional class or a
+  fractional "labelled" flag would both be lies);
+- the **global mean/std of channel 0 over labelled foreground voxels**
+  is the z-score applied to every image after resampling. Single-channel
+  CT is the supported modality. A corpus whose foreground has no
+  intensity spread is refused at plan time, named — there is no z-score
+  to train with.
+
+The decision lands in the bundle as **`preprocess.json`**
+(`{"target_spacing": [...], "normalization": {"mean", "std"}}`) and in
+the fit summary under `preprocessing`. Inference replays it
+transparently: `predict` z-scores the incoming image, resamples it up to
+the target grid when the caller passes a `spacing_mm` that differs, runs
+the windows, and resamples the probability map BACK to the caller's grid
+— the returned label lives on the input volume's own grid, whatever the
+training spacing was. `vanilla-evaluate` and the `predict` subcommand
+pass each case's own spacing automatically; library callers spell it
+`predictor.predict(image, spacing_mm=case.spacing_mm)`. Bundles written
+before preprocessing existed carry no `preprocess.json` and load as
+identity: old bundles keep predicting exactly as they always did.
+
 ### Cross-validation, and what a fold is
 
 `vanilla-crossval` fingerprints ALL cases once and refits the network from
@@ -236,8 +266,15 @@ net = build_unet(plan.network_config(input_channels=cases[0].image.shape[0]))
 trainer = VanillaTrainer(net, num_classes=plan.fingerprint.num_classes,
                          plan=plan.fit_plan(), device="cpu")
 trainer.fit(cases[2:], cases[:2], np.random.default_rng(0), out_dir="bundle")
-label, probabilities = load_predictor("bundle").predict(cases[0].image)
+label, probabilities = load_predictor("bundle").predict(
+    cases[0].image, spacing_mm=cases[0].spacing_mm)
 ```
+
+The library path above is the hand-rolled one: it fits the cases it is
+given. `medos_trainer.standalone.fit_command` is the door that also
+applies the plan's preprocessing — resample to `plan.target_spacing`,
+z-score with `plan.normalization`, both replayed from the bundle at
+predict time (see "Preprocessing" above).
 
 `trainer/examples/toy_pipeline.py` is the same pipeline end to end —
 synthetic corpus, plan, fit, held-out prediction — in one page, runnable
@@ -252,7 +289,8 @@ python trainer/examples/toy_pipeline.py
 | module | what it owns |
 |---|---|
 | `medos_trainer/vanilla/data.py` | the `Case` format, patch sampling, batching, mirror/rotate and scale/elastic augmentation |
-| `medos_trainer/vanilla/plan.py` | the fingerprint, the plan derivation, the reasons |
+| `medos_trainer/vanilla/plan.py` | the fingerprint, the plan derivation, the reasons, the preprocessing decision (target spacing, foreground z-score) |
+| `medos_trainer/vanilla/preprocess.py` | resampling to the plan's target spacing, the foreground z-score, the `preprocess.json` record |
 | `medos_trainer/vanilla/nets.py` | the 3D UNet with deep supervision and its configuration |
 | `medos_trainer/vanilla/losses.py` | the masked segmentation loss |
 | `medos_trainer/vanilla/trainer.py` | the fit loop, AMP, checkpointing, the resume record, the bundle, the plateau/poly lr laws |

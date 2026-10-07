@@ -31,6 +31,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from medos_trainer.vanilla.nets import UNetConfig, VanillaUNet
+from medos_trainer.vanilla.preprocess import (
+    Preprocessing,
+    match_spatial_shape,
+    resample,
+    spacing_matches,
+)
 
 
 @lru_cache(maxsize=8)
@@ -77,6 +83,16 @@ class SlidingWindowPredictor:
     returns a tuple and the refusal says so, because silently taking the last
     element would bake "which head is the answer" into a place the config
     already answers.
+
+    `preprocessing` is WHAT THE BUNDLE KNOWS ABOUT ITS TRAINING DATA: the
+    spacing the corpus was resampled to and the foreground z-score that was
+    applied. When present, `predict` z-scores every incoming image and, when
+    the caller passes the image's `spacing_mm` and it differs from the
+    target, resamples the image UP to the target grid before the windows run
+    and resamples the probability map BACK to the caller's grid afterwards —
+    the returned label lives on the input volume's own grid. When None (a
+    bundle without `preprocess.json`) prediction is exactly what it always
+    was, whatever the spacing.
     """
 
     def __init__(
@@ -86,6 +102,7 @@ class SlidingWindowPredictor:
         overlap: float = 0.5,
         batch_size: int = 2,
         device: str = "cpu",
+        preprocessing: Preprocessing | None = None,
     ) -> None:
         if net.config.deep_supervision:
             raise ValueError(
@@ -99,10 +116,54 @@ class SlidingWindowPredictor:
         self.overlap = overlap
         self.batch_size = batch_size
         self.device = device
+        self.preprocessing = preprocessing
 
     @torch.no_grad()
-    def predict(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """(C,K,J,I) image -> (label (K,J,I) int64, probabilities (C,K,J,I) f32)."""
+    def predict(
+        self,
+        image: np.ndarray,
+        spacing_mm: tuple[float, float, float] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """(C,K,J,I) image -> (label (K,J,I) int64, probabilities (C,K,J,I) f32).
+
+        THE PREPROCESSING IS TRANSPARENT: with a `preprocessing` record, the
+        image is z-scored always, and resampled to the target grid whenever
+        `spacing_mm` says it is not on it already (`spacing_mm=None` means
+        "assume the target grid" — the honest spelling for a caller whose
+        volume IS on the training grid, and the behavior old callers got).
+        When the image was resampled UP, the probabilities come BACK to the
+        caller's grid (order 3 per channel) and the label is the argmax of
+        the back-resampled map — so the label's shape is the input volume's
+        shape, never the target grid's.
+        """
+        if self.preprocessing is None:
+            return self._predict_on_grid(image)
+        normalized = self.preprocessing.normalization.normalize(
+            np.asarray(image, dtype=np.float32)
+        )
+        target = self.preprocessing.target_spacing
+        if spacing_mm is None or spacing_matches(spacing_mm, target):
+            return self._predict_on_grid(normalized)
+        resampled = resample(normalized, spacing_mm, target, order=3)
+        _, probs = self._predict_on_grid(resampled)
+        # BACK to the caller's grid: the probabilities are continuous, so
+        # order 3 per channel; the label is the argmax AFTER the return trip,
+        # on the grid the caller's ground truth lives on. Zoom rounds its
+        # output extent, so the trip is pinned to the input's EXACT shape —
+        # the label-grid contract is exact, not within-a-voxel.
+        back = match_spatial_shape(
+            resample(probs, target, spacing_mm, order=3), image.shape[-3:]
+        )
+        return (
+            back.argmax(axis=0).astype(np.int64),
+            back.astype(np.float32),
+        )
+
+    @torch.no_grad()
+    def _predict_on_grid(
+        self, image: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """The sliding-window pass itself, on whatever grid the image is on."""
         x = torch.as_tensor(
             image, dtype=torch.float32, device=self.device
         ).unsqueeze(0)
@@ -197,12 +258,20 @@ class EnsemblePredictor:
         self.num_classes = classes[0]
 
     @torch.no_grad()
-    def predict(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """(C,K,J,I) image -> (label (K,J,I) int64, mean probabilities f32)."""
+    def predict(
+        self, image: np.ndarray, spacing_mm: tuple[float, float, float] | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """(C,K,J,I) image -> (label (K,J,I) int64, mean probabilities f32).
+
+        `spacing_mm` is passed through to every member: a member with a
+        `preprocessing` record resamples and resamples back (see
+        `SlidingWindowPredictor.predict`); a member without one ignores it.
+        Members MUST agree on the returned grid — each checks the next
+        member's probability shape against the first's."""
         agreed = (self.num_classes,) + tuple(image.shape[-3:])
         mean = None
         for idx, member in enumerate(self.members):
-            _, probs = member.predict(image)
+            _, probs = member.predict(image, spacing_mm=spacing_mm)
             if probs.shape != agreed:
                 raise ValueError(
                     f"ensemble member {idx} produced probabilities of shape "
@@ -262,6 +331,7 @@ def save_inference_bundle(
     net: VanillaUNet,
     record: dict,
     patch_size: tuple[int, int, int] | None = None,
+    preprocessing: Preprocessing | None = None,
 ) -> None:
     """Everything inference needs, beside the checkpoint record itself.
 
@@ -269,7 +339,13 @@ def save_inference_bundle(
     is derived at load time), `net_config.json` (rebuilds the net),
     `fit_plan.json` with the patch size (not part of `UNetConfig`; without it
     a bundle cannot say what window it was trained on), `checkpoint.json`
-    (the caller's record — the trainer writes its best-validation record here).
+    (the caller's record — the trainer writes its best-validation record here),
+    and — when the fit ran with one — `preprocess.json`: the target spacing
+    and foreground z-score the corpus was resampled and normalized with, so
+    the predict path can replay them on any incoming image. Bundles written
+    before preprocessing existed carry no `preprocess.json`; `load_predictor`
+    reads a missing file as "identity", and they keep predicting as they
+    always did.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -281,6 +357,10 @@ def save_inference_bundle(
         (out / "fit_plan.json").write_text(
             json.dumps({"patch_size": list(patch_size)}, indent=2),
             encoding="utf-8",
+        )
+    if preprocessing is not None:
+        (out / "preprocess.json").write_text(
+            json.dumps(preprocessing.to_dict(), indent=2), encoding="utf-8"
         )
     (out / "checkpoint.json").write_text(
         json.dumps(record, indent=2), encoding="utf-8"
@@ -298,12 +378,24 @@ def load_predictor(
     The bundle stores the TRAINING net (deep supervision on, aux heads in the
     state dict). Serving goes through `served_net`, so the same weights become
     the one-tensor artifact — one derivation, used by export and by loading.
+    A bundle that carries `preprocess.json` loads WITH its preprocessing (the
+    target spacing and z-score the fit trained on); one without loads with
+    preprocessing=None and predicts exactly as pre-preprocessing bundles did.
+    The INPUT SPACING is the caller's to pass: `predict(image,
+    spacing_mm=case.spacing_mm)` — the bundle knows its target, only the
+    caller knows what grid the incoming volume is defined on.
     """
     out = Path(checkpoint_dir)
     config = UNetConfig(
         **json.loads((out / "net_config.json").read_text(encoding="utf-8"))
     )
     plan = json.loads((out / "fit_plan.json").read_text(encoding="utf-8"))
+    preprocess_path = out / "preprocess.json"
+    preprocessing = (
+        Preprocessing.from_dict(json.loads(preprocess_path.read_text(encoding="utf-8")))
+        if preprocess_path.is_file()
+        else None
+    )
     net = VanillaUNet(config)
     net.load_state_dict(torch.load(out / "model.pt", map_location=device))
     return SlidingWindowPredictor(
@@ -312,4 +404,5 @@ def load_predictor(
         overlap=overlap,
         batch_size=batch_size,
         device=device,
+        preprocessing=preprocessing,
     )
