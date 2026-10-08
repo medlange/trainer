@@ -316,6 +316,7 @@ def served_net(net: VanillaUNet) -> VanillaUNet:
             features=net.config.features,
             stem_stride=net.config.stem_stride,
             deep_supervision=False,
+            residual=net.config.residual,
         )
     )
     missing, unexpected = twin.load_state_dict(net.state_dict(), strict=False)

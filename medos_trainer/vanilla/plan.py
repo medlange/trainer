@@ -147,12 +147,20 @@ class PlannedRun:
     reasons: tuple[str, ...] = field(default=())
 
     def network_config(self, input_channels: int = 1) -> UNetConfig:
+        # RESIDUAL ENCODER BY DEFAULT: the benchmark evidence (see
+        # docs/benchmark-pulmo-2026-10-07.md, W16 addendum) is that at real
+        # low-contrast CT the plain block optimizes an order of magnitude
+        # slower than nnU-Net; the residual encoder is the measured fix
+        # (toy learnability 0.23 -> 0.80, test_residual.py). UNetConfig's own
+        # default stays False so hand-built nets and old bundles are
+        # byte-identical.
         return UNetConfig(
             input_channels=input_channels,
             num_classes=self.fingerprint.num_classes,
             features=self.preset.features,
             stem_stride=self.stem_stride,
             deep_supervision=True,
+            residual=True,
         )
 
     def fit_plan(self) -> FitPlan:
