@@ -134,7 +134,45 @@ the one-directional resampling back onto the caller's own grid.
 
 | | nnU-Net v2 | Medlange Trainer |
 |---|---|---|
-| Foreground Dice on held-out val (4 cases, one evaluator) | **0.764** | **pending rerun** |
+| Foreground Dice on held-out val (4 cases, one evaluator) | **0.764** | **0.000** (preprocessing applied and verified) |
+
+
+### W16 rerun result and the real root cause (2026-10-08)
+
+The rerun with full preprocessing (normalization stats sane: fluid mean 5.2
+HU, std 24.9; spacing parity with nnU-Net's plan verified) STILL produced
+0.000 foreground Dice. The preprocessing hypothesis is falsified as the
+PRIMARY cause. What the systematic step-by-step comparison and probe battery
+found instead:
+
+1. Configs are equivalent where measurable: nnU-Net's planned patch
+   (96,160,160) at spacing (1.0, 0.782, 0.782) is the same physical context
+   as ours (96,176,144) at (0.782, 0.782, 1.0) — axis-order convention only;
+   batch 2 vs our 2 (1 after the tenant-OOM fallback); same optimizer family
+   (SGD 0.01, momentum 0.99, nesterov); same loss family (CE + soft Dice).
+2. The deficit is optimization speed, not a bug: a 1000-step probe on the
+   real corpus moves training loss 1.0 -> 0.66 — learning, but an order of
+   magnitude slower than nnU-Net, which reaches pseudo-Dice 0.58 by epoch 3.
+   The 5-epoch benchmark budget hands both frameworks exactly 1250
+   iterations — right where ours is barely off chance.
+3. Probe battery on the real corpus: lr sweep (0.001/0.01/0.1) — no arm
+   converges; percentile clipping (nnU-Net clips, we did not) — no effect;
+   synthetic high-contrast foreground (+40 z) — LEARNS immediately, proving
+   the pipeline is sound and the task at real contrast is hard per-patch;
+   augmentation on/off — no difference; a hand-rolled residual block —
+   destabilised at this depth/lr (architecture research, not a benchmark
+   fix, deferred).
+4. Fixed in this cycle: deep-supervision weights (equal averaging diluted the
+   full-res head to 1/n; now 0.5^(n-1-i) normalised, nnU-Net's shape,
+   oriented at our (*aux, full_res) order).
+
+CONCLUSION. At this budget nnU-Net wins, honestly. Closing the remaining gap
+is roadmap W17: residual-encoder architecture done properly (nnU-Net's
+resenc preset), dataloader workers (our epochs are CPU-pipeline-bound at
+~1 h vs nnU-Net's 63 s, which makes any equal-iteration comparison
+prohibitively slow on shared hardware), and a re-run at a budget where both
+frameworkes actually learn (the 5-epoch constraint punishes the slower-
+optimizing trainer; nnU-Net's own default is 1000 epochs).
 
 Numbers pending rerun on the benchmark box (same split, same budget:
 `vanilla-fit --preset large --epochs 5 --steps-per-epoch 250 --seed 0`,
