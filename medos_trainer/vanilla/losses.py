@@ -67,7 +67,16 @@ def masked_soft_dice(
 
 
 class MaskedSegmentationLoss(nn.Module):
-    """CE + Dice over labelled voxels; averages over deep-supervision outputs."""
+    """CE + Dice over labelled voxels; nnU-Net-style deep-supervision weights.
+
+    THE FULL-RESOLUTION HEAD CARRIES THE ANSWER, so it carries the most
+    weight: w_i = 0.5^(n-1-i) over the tuple (aux heads first, the served
+    output last), normalised to sum 1. The equal-weight average this
+    replaced diluted the full-res head to a 1/n share — measured on the
+    PulmoAI probe as part of the optimization-speed gap vs nnU-Net (their
+    MultipleOutputLossTwo uses the same 1/2^i shape; see
+    docs/benchmark-pulmo-2026-10-07.md, W16 addendum).
+    """
 
     def __init__(self, num_classes: int, dice_weight: float = 1.0) -> None:
         super().__init__()
@@ -82,16 +91,21 @@ class MaskedSegmentationLoss(nn.Module):
     ) -> torch.Tensor:
         if isinstance(outputs, torch.Tensor):
             outputs = (outputs,)
+        # w grows toward the LAST element: (*aux, full_res) -> full_res heaviest.
+        weights = [0.5 ** (len(outputs) - 1 - i) for i in range(len(outputs))]
+        norm = sum(weights)
         total = outputs[0].new_zeros(())
-        for out in outputs:
+        for out, w in zip(outputs, weights):
             # Deep-supervision heads sit at lower resolutions; the target and
             # mask travel NEAREST-NEIGHBOUR down to each head's grid. Labels
             # are class indices (no averaging across classes), masks are
             # binary (no fractional membership).
             t, m = self._to(out, target, mask)
-            total = total + masked_cross_entropy(out, t, m, self.num_classes) \
+            total = total + (w / norm) * (
+                masked_cross_entropy(out, t, m, self.num_classes)
                 + self.dice_weight * masked_soft_dice(out, t, m, self.num_classes)
-        return total / len(outputs)
+            )
+        return total
 
     @staticmethod
     def _to(out: torch.Tensor, target: torch.Tensor,

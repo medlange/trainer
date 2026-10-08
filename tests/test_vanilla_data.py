@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 import torch
 from medos_trainer.vanilla.data import (
     Case,
@@ -157,3 +158,30 @@ def test_deep_supervision_tuple_flows_through_training() -> None:
                               torch.as_tensor(masks))
     assert np.isfinite(loss) and loss > 0
 
+
+
+def test_deep_supervision_weights_favour_the_full_resolution_head() -> None:
+    """nnU-Net's 1/2^i shape, oriented at OUR tuple order (*aux, full_res):
+    the served head must dominate, not share equally. Each fake head returns
+    its index+1 as CE, so the loss IS the weight orientation, read out loud."""
+    import medos_trainer.vanilla.losses as losses
+    import torch
+    from medos_trainer.vanilla.losses import MaskedSegmentationLoss
+
+    real_ce, real_dice = losses.masked_cross_entropy, losses.masked_soft_dice
+    try:
+        losses.masked_cross_entropy = lambda out, t, m, nc: out.sum() * 0.0 + torch.as_tensor(
+            {4: 1.0, 8: 2.0, 16: 3.0}[out.shape[-1]], dtype=torch.float32)
+        losses.masked_soft_dice = lambda *a: torch.as_tensor(0.0)
+        # spatial sizes 4/8/16 encode head index 1/2/3 -> CE values 1, 2, 3
+        heads = tuple(torch.zeros(1, 2, n, n, n) for n in (4, 8, 16))
+        target = torch.zeros(1, 16, 16, 16, dtype=torch.long)
+        total = float(MaskedSegmentationLoss(num_classes=2)(heads, target, None))
+    finally:
+        losses.masked_cross_entropy, losses.masked_soft_dice = real_ce, real_dice
+    weights = [0.5 ** (3 - 1 - i) for i in range(3)]
+    norm = sum(weights)
+    expected = sum(w / norm * v for w, v in zip(weights, (1.0, 2.0, 3.0)))
+    assert total == pytest.approx(expected), (total, expected)
+    # and the orientation is the point: full_res weight > equal share
+    assert weights[-1] / norm > 1 / 3
