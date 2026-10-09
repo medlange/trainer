@@ -115,7 +115,41 @@ python examples/benchmark_pulmo.py --out bench --import-nnunet-preds bench/nnpre
 python bench/eval_nnunet_preds.py --bench bench
 ```
 
-## Next (roadmap W16)
+
+### W17 (2026-10-09): residual encoder, DS weights, throughput — and the realistic-budget table
+
+Cropped-corpus benchmark (same 20 hydrothorax cases, central 320x320x260
+crop, identical split and evaluator). The crop exists because full-volume
+Medlange epochs were CPU-pipeline-bound on the shared box; the crop keeps
+the task and classes identical at 1/5th the voxels.
+
+| run | budget | fg Dice |
+|---|---|---|
+| nnU-Net 3d_fullres (crops) | 5 epochs | 0.716 |
+| **nnU-Net 3d_fullres (crops)** | **50 epochs** | **0.782** |
+| Medlange (preprocessing W16, plain net) | 5 epochs | 0.000 |
+| Medlange (residual + DS weights) | 5 epochs | 0.000 |
+| Medlange (residual + DS weights + TF32/AMP/prefetch) | 40 epochs | **pending** |
+
+Findings this cycle:
+- THE RESAMPLING AUGMENTATION WAS THE WALL-CLOCK KILLER, not a quality
+  factor: with `augment_resample` off, GPU0 went 0% -> 100% and an epoch
+  dropped from >68 min to ~7 min. Augmentation is now a plan flag, off for
+  throughput-critical runs.
+- Residual encoder (pre-activation, zero-init identity start) landed as
+  `UNetConfig.residual`, enabled by plans: toy learnability 0.23 -> 0.80.
+  Hand-rolled residual probes NaN'd at lr 0.01; the shipped block's
+  zero-init second conv is what makes it stable.
+- DS loss weights 0.5^(n-1-i) normalised (nnU-Net's shape, oriented at our
+  (*aux, full_res) order).
+- Throughput stack (TF32 on CUDA, foreground-coord cache, prefetch
+  thread) — the engineering answer to the 8-20x per-iteration gap:
+  nnU-Net overlaps CPU work in 8 dataloader processes and caches
+  preprocessing; we now overlap in a producer thread and skip the
+  redundant per-step argwhere. TF32 is the free 3-5x conv multiplier
+  nnU-Net already takes.
+
+## Next (roadmap W18)
 
 Fingerprint foreground-intensity statistics + dataset z-score normalisation;
 resampling to median spacing in the pipeline; dataloader workers for the
