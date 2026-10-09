@@ -172,16 +172,17 @@ class PlannedRun:
             learning_rate=self.learning_rate,
             weight_decay=self.weight_decay,
             foreground_prob=self.foreground_prob,
-            # A REAL PLAN gets the full augmentation family: mirror/rotate are
-            # free of invention risk, and the scale/elastic pair is the part
-            # that teaches scale and deformation invariance. Hand-written
-            # FitPlans default it off and keep their byte-exact dynamics.
-            augment_resample=True,
-            # ... and the INTENSITY tier with them: brightness/contrast/gamma
-            # are the nnU-Net-parity transforms the PulmoAI benchmark named as
-            # a gap (docs/benchmark-pulmo-2026-10-07.md — nnU-Net augments
-            # intensity, we only did geometry). Hand-written FitPlans default
-            # it off and keep their byte-exact dynamics.
+            # THE RESAMPLING PAIR IS OPT-IN, NOT A PLAN DEFAULT: the PulmoAI
+            # campaign caught a perfect correlation — every run with
+            # scale/elastic ON eventually entered a multi-hour CPU stall
+            # (GPU 0%, main thread spinning), every run without it completed
+            # cleanly (docs/benchmark-pulmo-2026-10-07.md, W18). Until the
+            # elastic path is fixed and re-proven, a plan must not hang its
+            # runner by default; vanilla-fit --augment-resample opts in.
+            augment_resample=False,
+            # The INTENSITY tier stays on: it is pure numpy in the producer
+            # thread, never implicated in the stall, and the benchmark named
+            # it a gap (nnU-Net augments intensity, we only did geometry).
             augment_intensity=True,
             # and a real plan PREFETCHES: the producer thread overlaps patch
             # sampling/augmentation with the GPU step (see prefetch.py) —

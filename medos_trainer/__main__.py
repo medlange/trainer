@@ -300,6 +300,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable the plan's scale/elastic augmentation (mirror/rotate stays on)",
     )
     vanilla_fit.add_argument(
+        "--augment-resample", action="store_true",
+        help="OPT IN to scale/elastic augmentation. NOT a plan default: the "
+             "PulmoAI campaign caught it stalling every run that enabled it "
+             "(multi-hour CPU stall, GPU idle) — see the benchmark report, "
+             "W18. Use only on a machine you can watch.",
+    )
+    vanilla_fit.add_argument(
         "--amp", action="store_true",
         help="autocast + GradScaler on CUDA devices (ignored on CPU)",
     )
@@ -434,7 +441,9 @@ def main(argv: list[str] | None = None) -> int:
             epochs=args.epochs, steps_per_epoch=args.steps_per_epoch,
             seed=args.seed, device=args.device,
             resume_from=args.resume_from, max_val_cases=args.max_val_cases,
-            use_amp=args.amp, augment_resample=False if args.no_augment_resample else None,
+            use_amp=args.amp,
+            augment_resample=(True if args.augment_resample
+                              else False if args.no_augment_resample else None),
             foreground_prob=args.foreground_prob, batch_size=args.batch_size,
             lr_schedule=args.lr_schedule,
             cascade_from=args.cascade_from,

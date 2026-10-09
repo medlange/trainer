@@ -178,10 +178,13 @@ def _fg_stats(cases: list[Case]) -> tuple[float, float]:
 
 
 def test_planned_run_carries_intensity() -> None:
-    """A real plan gets the full nnU-Net-parity augmentation family; a
-    hand-written FitPlan keeps every default off and stays byte-exact."""
+    """A real plan gets the INTENSITY tier (pure numpy, never implicated in
+    the elastic stall) and KEEPS the resampling pair OFF — the PulmoAI
+    campaign caught scale/elastic stalling every run that enabled it (W18),
+    so it is opt-in (--augment-resample), not a plan default. A hand-written
+    FitPlan keeps every default off and stays byte-exact."""
     fp = collect_fingerprint(_toy_cases(3, seed=0))
     fit_plan = plan_from_fingerprint(fp, "cpu").fit_plan()
     assert fit_plan.augment_intensity is True
-    assert fit_plan.augment_resample is True
+    assert fit_plan.augment_resample is False
     assert FitPlan(patch_size=(16, 16, 16)).augment_intensity is False
