@@ -189,6 +189,13 @@ class PlannedRun:
             # waited on. Hand-written FitPlans keep 0 (byte-exact, the test
             # suite's reproducible path).
             prefetch_batches=4,
+            # POLY, NOT PLATEAU: the budget sweep caught the plateau arm's
+            # patience=2 annealing lr to ~0 by epoch ~15 of any long run —
+            # 160 epochs scored WORSE than 40 (0.413 vs 0.427) because the
+            # run froze. Poly anneals by design to the run's end (nnU-Net's
+            # own shape). Hand-written FitPlans keep "plateau" — the defect
+            # only bites at real budgets, and the tests pin its arithmetic.
+            lr_schedule="poly",
         )
 
     @property

@@ -88,8 +88,10 @@ def test_fit_command_resume_continues_epoch_numbering_and_best(tmp_path,
     assert (bundle / "training_state.pt").is_file()
     assert len(first["history"]) == 2
     assert [r["epoch"] for r in first["history"]] == [0, 1]
-    # The scheduler watched a strictly improving loss: lr is untouched.
-    assert first["history"][-1]["lr"] == pytest.approx(first["history"][0]["lr"])
+    # Real plans run poly now (the budget sweep caught plateau freezing long
+    # runs), so lr DECAYS between epochs — the only pin here is that every
+    # record carries one, i.e. the schedule is actually driving.
+    assert all(r["lr"] > 0 for r in first["history"])
 
     second = fit_command(cases, "cpu", bundle, epochs=4, steps_per_epoch=1,
                          seed=0, resume_from=bundle)
