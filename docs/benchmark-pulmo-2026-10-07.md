@@ -151,6 +151,49 @@ Findings this cycle:
   redundant per-step argwhere. TF32 is the free 3-5x conv multiplier
   nnU-Net already takes.
 
+
+### Budget sweep — convergence curves (2026-10-09, final)
+
+Full budget grid on the crop corpus, same split, same evaluator.
+Medlange rows: residual+DS+TF32/AMP+prefetch stack; the plateau rows ran
+without intensity augmentation (launched before it existed), the poly row
+has it.
+
+| epochs | nnU-Net fg Dice | Medlange (plateau) | Medlange (poly+intensity) |
+|---|---|---|---|
+| 5 | 0.716 | 0.000 | — |
+| 10 | 0.657 | 0.266 | — |
+| 20 | 0.756 | 0.334 | — |
+| 40 | — | 0.427 | — |
+| 50 | 0.756–0.782 | — | — |
+| 80 | — | 0.426 | **0.482** |
+| 100 | 0.834 | — | — |
+| 160 | — | 0.413 | — |
+| 250 | 0.849 | — | — |
+
+READING THE CURVES:
+1. nnU-Net climbs fast and keeps climbing (0.66 -> 0.85 over 10->250
+   epochs). No plateau in reach.
+2. Medlange's plateau-arm FREEZES at ~0.43 from epoch 40 onward — the
+   plateau scheduler's patience=2 on a noisy val fires lr reductions until
+   lr ~ 0 by epoch ~15 of 80; the rest of the run trains nothing. That is
+   a scheduling defect, not a quality ceiling: the poly arm at the same
+   80 epochs reaches 0.482 with the val curve still falling.
+3. Even poly+intensity leaves a real gap to nnU-Net at matched budgets
+   (0.48 vs ~0.76 at 50-80 epochs). The next levers, named in order of
+   expected value: nnU-Net's full geometric augmentation in the loop
+   (our scale/elastic was OFF in all these runs — it was the throughput
+   killer before the prefetch thread and is now affordable), batch size
+   (ours 2 vs their planned 2-12), and longer poly runs at 250-1000
+   epochs on a quiet machine.
+
+CONCLUSION OF THE BENCHMARK PHASE. Medlange went from not learning this
+task at all (0.000) to a documented, honestly-gapped 0.48 against
+nnU-Net's 0.85 on identical data/evaluation — with the gap localised to
+named, addressable items rather than a mysterious deficit. The framework
+is not yet "better than nnU-Net"; it is now, for the first time, in the
+same game with a written map of the remaining distance.
+
 ## W18 (open)
 
 1. THE EPOCH-STALL PATHOLOGY: periodically an epoch goes from ~75 s to 20+

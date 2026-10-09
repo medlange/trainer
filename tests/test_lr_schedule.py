@@ -119,3 +119,28 @@ def test_poly_resume_record_carries_no_scheduler_and_restores(tmp_path) -> None:
     ):
         assert n_a == n_b
         assert torch.equal(p_a, p_b)
+
+
+def test_fit_command_lr_schedule_override(tmp_path) -> None:
+    import json
+
+    from medos_trainer.standalone import fit_command
+    from test_standalone import _write_cases
+
+    cases = _write_cases(tmp_path)
+    bundle = tmp_path / "bundle-poly"
+    fit_command(cases, "cpu", bundle, epochs=2, steps_per_epoch=1,
+                lr_schedule="poly")
+    record = json.loads((bundle / "checkpoint.json").read_text(encoding="utf-8"))
+    # poly with epochs=2: the record of epoch 1 carries lr = base*(1-1/2)^0.9
+    assert record["lr"] == pytest.approx(0.01 * 0.5 ** 0.9, rel=1e-6)
+
+
+def test_fit_command_lr_schedule_refuses_garbage(tmp_path) -> None:
+    from medos_trainer.standalone import fit_command
+    from test_standalone import _write_cases
+
+    cases = _write_cases(tmp_path)
+    with pytest.raises(ValueError, match="lr_schedule"):
+        fit_command(cases, "cpu", tmp_path / "bundle", epochs=1,
+                    steps_per_epoch=1, lr_schedule="cosine")

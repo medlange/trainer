@@ -350,6 +350,7 @@ def fit_command(
     augment_resample: bool | None = None,
     foreground_prob: float | None = None,
     batch_size: int | None = None,
+    lr_schedule: str | None = None,
     cascade_from: str | Path | None = None,
 ) -> dict:
     """The whole autonomous pipeline: data -> fingerprint -> plan -> fit -> bundle.
@@ -420,13 +421,16 @@ def fit_command(
     val = preprocess_cases(cases[:split], preprocessing)
     val_raw = cases[:split]
     fit_plan = plan.fit_plan()
-    if augment_resample is not None or use_amp:
+    if augment_resample is not None or use_amp or lr_schedule is not None:
         fit_plan = replace(
             fit_plan,
             augment_resample=fit_plan.augment_resample
             if augment_resample is None
             else augment_resample,
             use_amp=use_amp,
+            lr_schedule=fit_plan.lr_schedule
+            if lr_schedule is None
+            else lr_schedule,
         )
     torch.manual_seed(seed)
     net = build_unet(plan.network_config(input_channels=cases[0].image.shape[0]))

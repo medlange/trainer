@@ -276,6 +276,14 @@ def build_parser() -> argparse.ArgumentParser:
                              help="override the preset's batch — the lever for "
                                   "shared GPUs where the planned batch OOMs "
                                   "beside another tenant's processes")
+    vanilla_fit.add_argument("--lr-schedule", choices=("plateau", "poly"),
+                             default=None,
+                             help="override the LR schedule. THE BENCHMARK "
+                                  "FOUND THE PLATEAU ARM FIRES TOO EARLY: "
+                                  "patience=2 on a noisy val anneals lr to "
+                                  "~0 by epoch ~15 of 80 and the run freezes "
+                                  "(0.427 at 40 and 80 epochs alike); poly "
+                                  "anneals by design to the run's end")
     vanilla_fit.add_argument("--seed", type=int, default=0)
     vanilla_fit.add_argument("--device", default="cpu")
     vanilla_fit.add_argument(
@@ -428,6 +436,7 @@ def main(argv: list[str] | None = None) -> int:
             resume_from=args.resume_from, max_val_cases=args.max_val_cases,
             use_amp=args.amp, augment_resample=False if args.no_augment_resample else None,
             foreground_prob=args.foreground_prob, batch_size=args.batch_size,
+            lr_schedule=args.lr_schedule,
             cascade_from=args.cascade_from,
         )
         print(json.dumps(summary, indent=2))
