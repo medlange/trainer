@@ -204,6 +204,17 @@ pass each case's own spacing automatically; library callers spell it
 before preprocessing existed carry no `preprocess.json` and load as
 identity: old bundles keep predicting exactly as they always did.
 
+AUGMENTATION, the family a fit applies on top of those pixels: mirror along
+any axis and 90-degree in-plane rotation (always on — they cannot invent
+anatomy); a random zoom plus a smooth elastic warp (`augment_resample`, on
+for planned runs, `--no-augment-resample` opts out); and the intensity trio
+— random brightness shift, contrast scaling and gamma, applied to the image
+alone after the geometric tiers (`augment_intensity`, the nnU-Net-parity
+tier the PulmoAI benchmark named as a gap: nnU-Net augments intensity, a
+geometry-only stack memorizes one intensity regime and loses foreground Dice
+on low-contrast data). Hand-written `FitPlan`s default both flags off and
+keep byte-exact dynamics; planned runs turn both on.
+
 ### Cross-validation, and what a fold is
 
 `vanilla-crossval` fingerprints ALL cases once and refits the network from
@@ -288,7 +299,7 @@ python trainer/examples/toy_pipeline.py
 
 | module | what it owns |
 |---|---|
-| `medos_trainer/vanilla/data.py` | the `Case` format, patch sampling, batching, mirror/rotate and scale/elastic augmentation |
+| `medos_trainer/vanilla/data.py` | the `Case` format, patch sampling, batching, mirror/rotate, scale/elastic and intensity augmentation |
 | `medos_trainer/vanilla/plan.py` | the fingerprint, the plan derivation, the reasons, the preprocessing decision (target spacing, foreground z-score) |
 | `medos_trainer/vanilla/preprocess.py` | resampling to the plan's target spacing, the foreground z-score, the `preprocess.json` record |
 | `medos_trainer/vanilla/nets.py` | the 3D UNet with deep supervision and its configuration |

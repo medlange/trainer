@@ -10,14 +10,18 @@ THE PATCH SAMPLER implements nnU-Net's foreground bias because it works: with
 probability `foreground_prob` the patch centre is drawn from the labelled
 foreground, otherwise uniformly. Rare structures actually get seen.
 
-AUGMENTATION has two tiers, and the line between them is "can this invent
-anatomy": mirror along any axis and 90-degree in-plane rotation cannot, and
-apply always; the resampling pair — random zoom and a smooth elastic warp —
-can move a border voxel's influence but is built so it never materialises
-voxels from nothing (zoom-out pads by REFLECTING the patch's own border,
-elastic out-of-range lookups clamp to the nearest real voxel). Interpolation
-rules follow the label/mask-are-discrete contract: image cubic, label and
-mask nearest.
+AUGMENTATION has three tiers, and the line between the geometric ones is
+"can this invent anatomy": mirror along any axis and 90-degree in-plane
+rotation cannot, and apply always; the resampling pair — random zoom and a
+smooth elastic warp — can move a border voxel's influence but is built so it
+never materialises voxels from nothing (zoom-out pads by REFLECTING the
+patch's own border, elastic out-of-range lookups clamp to the nearest real
+voxel). Interpolation rules follow the label/mask-are-discrete contract:
+image cubic, label and mask nearest. The third tier is INTENSITY —
+brightness, contrast, gamma on the image alone — the nnU-Net-parity tier the
+PulmoAI benchmark named as a gap (docs/benchmark-pulmo-2026-10-07.md); it
+invents nothing and moves nothing, so it runs after the geometric tiers and
+leaves label and mask untouched.
 """
 
 from __future__ import annotations
@@ -270,6 +274,78 @@ def augment_scale_elastic(
         image=np.ascontiguousarray(image),
         label=np.ascontiguousarray(label),
         mask=None if mask is None else np.ascontiguousarray(mask),
+        centre=patch.centre,
+        spacing_mm=patch.spacing_mm,
+    )
+
+
+def augment_intensity(
+    patch: Patch,
+    rng: np.random.Generator,
+    brightness: float = 0.25,
+    contrast: tuple[float, float] = (0.65, 1.5),
+    gamma: tuple[float, float] = (0.7, 1.5),
+) -> Patch:
+    """Random brightness shift, contrast scaling and gamma — the image alone.
+
+    WHY THESE THREE: they are nnU-Net's intensity tier (BrightnessTransform /
+    ContrastTransform / GammaTransform), the named gap in the PulmoAI
+    benchmark (docs/benchmark-pulmo-2026-10-07.md): nnU-Net augments
+    intensity, this stack augmented only geometry. Real protocols photograph
+    the same pathology at different brightnesses and contrasts; a net that
+    only ever sees one intensity regime keys on the regime instead of the
+    anatomy — and on a low-contrast corpus that is exactly how foreground
+    Dice is lost.
+
+    WHY ON Z-SCORED DATA: this runs AFTER the bundle normalization
+    (preprocessing z-scores every case before fit), so `brightness` is a flat
+    shift in corpus-standard-deviation units and the contrast/gamma ranges
+    bend a histogram the net already sees as O(1) — the same meaning on every
+    corpus.
+
+    ORDER MATTERS: the caller runs this AFTER the geometric tiers
+    (mirror/rotate, then scale/elastic), never before — geometric
+    resampling of a gamma-mapped image would interpolate the mapping, not
+    the pixels. Intensity invents nothing and displaces nothing, so unlike
+    the geometric tiers it cannot break image-label alignment — which is why
+    label and mask pass through UNTOUCHED: a single wrong pixel in the label
+    is a mislabelled voxel. Brightness is one flat draw per patch; contrast
+    stretches each channel around its own patch mean with a per-channel
+    factor; gamma per channel maps a (p1, p99) percentile window to [0, 1],
+    bends it with the power law, and maps back — a degenerate window
+    (p99 - p1 < 1e-6, a constant channel) skips gamma for that channel
+    rather than dividing by zero. The value math runs in float64 and casts
+    back, so neutral parameters reproduce the input to within a float32
+    round-off — far inside any training tolerance.
+    """
+    image = patch.image.copy()
+    # BRIGHTNESS: one flat draw, added to every voxel of every channel.
+    image += np.float32(rng.uniform(-brightness, brightness))
+    # CONTRAST: stretch each channel around its own patch mean. The mean is
+    # the level the net has learned to expect, so the channel pivots there.
+    for c in range(image.shape[0]):
+        channel = image[c].astype(np.float64)
+        mean = float(channel.mean())
+        channel = (channel - mean) * float(rng.uniform(*contrast)) + mean
+        # GAMMA: the percentile window is where the channel's information
+        # actually lives; the power law bends INSIDE it and the linear map
+        # restores the scale. Voxels OUTSIDE the window (the ~2% tails —
+        # a bright vessel, metal) pass through untouched: gamma must not
+        # crush them, and leaving them out keeps neutral parameters at a
+        # float32-round-trip from the identity. `inside` also keeps a
+        # fractional power away from negative bases.
+        p1, p99 = np.percentile(channel, (1.0, 99.0))
+        window = float(p99 - p1)
+        if window >= 1e-6:
+            g = float(rng.uniform(*gamma))
+            inside = (channel >= p1) & (channel <= p99)
+            norm = (channel[inside] - p1) / window
+            channel[inside] = norm ** g * window + p1
+        image[c] = channel.astype(image.dtype)
+    return Patch(
+        image=np.ascontiguousarray(image, dtype=patch.image.dtype),
+        label=patch.label,
+        mask=patch.mask,
         centre=patch.centre,
         spacing_mm=patch.spacing_mm,
     )

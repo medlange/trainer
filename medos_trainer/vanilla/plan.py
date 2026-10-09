@@ -177,6 +177,12 @@ class PlannedRun:
             # that teaches scale and deformation invariance. Hand-written
             # FitPlans default it off and keep their byte-exact dynamics.
             augment_resample=True,
+            # ... and the INTENSITY tier with them: brightness/contrast/gamma
+            # are the nnU-Net-parity transforms the PulmoAI benchmark named as
+            # a gap (docs/benchmark-pulmo-2026-10-07.md — nnU-Net augments
+            # intensity, we only did geometry). Hand-written FitPlans default
+            # it off and keep their byte-exact dynamics.
+            augment_intensity=True,
             # and a real plan PREFETCHES: the producer thread overlaps patch
             # sampling/augmentation with the GPU step (see prefetch.py) —
             # the benchmark measured ~0.3-0.5 s/step of CPU work the GPU
