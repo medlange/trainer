@@ -172,14 +172,14 @@ class PlannedRun:
             learning_rate=self.learning_rate,
             weight_decay=self.weight_decay,
             foreground_prob=self.foreground_prob,
-            # THE RESAMPLING PAIR IS OPT-IN, NOT A PLAN DEFAULT: the PulmoAI
-            # campaign caught a perfect correlation — every run with
-            # scale/elastic ON eventually entered a multi-hour CPU stall
-            # (GPU 0%, main thread spinning), every run without it completed
-            # cleanly (docs/benchmark-pulmo-2026-10-07.md, W18). Until the
-            # elastic path is fixed and re-proven, a plan must not hang its
-            # runner by default; vanilla-fit --augment-resample opts in.
-            augment_resample=False,
+            # THE RESAMPLING PAIR IS BACK AS A PLAN DEFAULT, FIXED: the
+            # stall that made it opt-in was not a hang but a ~35 s/patch
+            # scipy path (per-voxel spline evaluation at full resolution).
+            # The torch-native rewrite (interpolate + coarse-field
+            # grid_sample) measures ~0.4 s/patch mean — the same transform
+            # family the prefetch producer can overlap. See
+            # docs/benchmark-pulmo-2026-10-07.md, W18.
+            augment_resample=True,
             # The INTENSITY tier stays on: it is pure numpy in the producer
             # thread, never implicated in the stall, and the benchmark named
             # it a gap (nnU-Net augments intensity, we only did geometry).

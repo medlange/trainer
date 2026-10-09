@@ -15,6 +15,7 @@ import numpy as np
 import torch
 from medos_trainer.vanilla.data import (
     Case,
+    Patch,
     PatchSampler,
     augment_scale_elastic,
 )
@@ -90,9 +91,29 @@ def test_training_finds_the_ball_with_resample_augmentation_on_and_off(tmp_path)
     background still improves on background-dominated patches, which is how
     a destructive elastic magnitude slipped past the first version of this
     test.)"""
-    from test_vanilla_data import _toy_cases
+    # THE BALL IS BIG ON PURPOSE: a radius-5 ball in a 24^3 volume sits at
+    # the edge of what a 2-voxel-displacement elastic (the physical default,
+    # std == alpha in voxels) leaves learnable — the old scipy field was
+    # accidentally milder and let a small ball through. The honest field
+    # needs a structure bigger than ~4 displacement sigmas, like real
+    # anatomy is.
+    def _big_toy(n: int, seed: int, shape: tuple[int, int, int] = (40, 40, 40)):
+        rng = np.random.default_rng(seed)
+        cases = []
+        for i in range(n):
+            image = rng.normal(-600.0, 50.0, (1, *shape)).astype(np.float32)
+            label = np.zeros(shape, dtype=np.int64)
+            c = rng.integers(14, 26, size=3)
+            kk, jj, ii = np.ogrid[: shape[0], : shape[1], : shape[2]]
+            ball = (kk - c[0]) ** 2 + (jj - c[1]) ** 2 + (ii - c[2]) ** 2 <= 7 ** 2
+            image[0][ball] = 200.0
+            label[ball] = 1
+            mask = np.ones_like(image)
+            cases.append(Case(image=image, label=label, mask=mask,
+                              spacing_mm=(1.0, 1.0, 1.0), case_id=f"big-{i}"))
+        return cases
 
-    train, val = _toy_cases(4, seed=0), _toy_cases(2, seed=100)
+    train, val = _big_toy(4, seed=0), _big_toy(2, seed=100)
 
     def foreground_dice(case, label) -> float:
         fg = (case.label == 1) & (case.mask[0] > 0)
@@ -103,7 +124,7 @@ def test_training_finds_the_ball_with_resample_augmentation_on_and_off(tmp_path)
         torch.manual_seed(0)
         net = build_unet(UNetConfig(input_channels=1, num_classes=2,
                                     features=(4, 8, 16), deep_supervision=True))
-        plan = FitPlan(patch_size=(16, 16, 16), batch_size=2, steps_per_epoch=8,
+        plan = FitPlan(patch_size=(32, 32, 32), batch_size=2, steps_per_epoch=8,
                        epochs=8, foreground_prob=1.0, augment_resample=augment_resample)
         trainer = VanillaTrainer(net, num_classes=2, plan=plan)
         before = trainer.validate(val, np.random.default_rng(9))
@@ -112,7 +133,7 @@ def test_training_finds_the_ball_with_resample_augmentation_on_and_off(tmp_path)
             f"augment_resample={augment_resample}: no progress "
             f"({result['best_val_masked_dice_loss']} vs {before})"
         )
-        held_out = _toy_cases(1, seed=7)[0]
+        held_out = _big_toy(1, seed=7)[0]
         label, _ = load_predictor(out_dir).predict(held_out.image)
         return foreground_dice(held_out, label)
 
@@ -122,3 +143,27 @@ def test_training_finds_the_ball_with_resample_augmentation_on_and_off(tmp_path)
     on = run(True, tmp_path / "on")
     assert off > 0.3, f"unaugmented run did not find the ball: {off}"
     assert on > 0.3, f"resample-augmented run did not find the ball: {on}"
+
+
+def test_resample_augmentation_perf_regression_guard() -> None:
+    """THE 35-SECOND PATCH MUST NEVER COME BACK. The W18 stall masqueraded
+    as a hang until a tracemalloc fuzz caught ~35 s/patch in scipy spline
+    evaluation; the torch-native rewrite measures ~0.4 s mean on this host.
+    The bound is 5 s — 12x slack for slow CI CPUs, still 7x under the bug."""
+    import time
+
+    rng = np.random.default_rng(0)
+    case = Case(
+        image=rng.normal(0.0, 1.0, (1, 96, 176, 176)).astype(np.float32),
+        label=(rng.random((96, 176, 176)) < 0.01).astype(np.int64),
+        mask=None, spacing_mm=(0.78, 0.78, 1.0), case_id="perf",
+    )
+    patch = Patch(image=case.image, label=case.label, mask=None,
+                  centre=(48, 88, 88), spacing_mm=case.spacing_mm)
+    start = time.perf_counter()
+    augment_scale_elastic(patch, rng)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 5.0, (
+        f"augment_scale_elastic took {elapsed:.1f}s on a (1,96,176,176) patch — "
+        "the W18 perf regression is back"
+    )

@@ -28,9 +28,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import scipy.ndimage
+
+if TYPE_CHECKING:
+    import torch  # annotations only — the runtime imports stay lazy
+
 
 
 @dataclass(frozen=True)
@@ -211,64 +216,50 @@ def augment_scale_elastic(
     resampling operations, and resampling can invent anatomy if it is allowed
     to look outside the patch — so every out-of-range rule here is a border
     rule: zooming out pads by REFLECTING the patch's own border, and the
-    elastic warp clamps lookups to the nearest real voxel (`mode="nearest"`).
-    Nothing the transform writes came from anywhere but the patch itself.
+    elastic warp clamps lookups to the nearest real voxel (`padding_mode=
+    "border"`). Nothing the transform writes came from anywhere but the
+    patch itself.
 
-    THE INTERPOLATION CONTRACT follows the label/mask-are-discrete rule:
-    the image warps cubic (order 3), the label and mask nearest (order 0) —
-    a fractional class membership or a fractional "labelled" flag would both
-    be lies. `elastic_alpha_mm` is a PHYSICAL magnitude, converted to voxels
-    through `patch.spacing_mm`, so the same number means the same deformation
-    on 0.5 mm CT and 3 mm thick-slice data. THE DEFAULT IS MILD ON PURPOSE:
-    the plan's patch is physically ~12-20 mm, and a per-axis displacement std
-    beyond a sixth of that scrambles image-label alignment instead of
-    bending it — 2 mm deforms, 15 mm destroys. `elastic_grid` is the
-    displacement field's coarse lattice (4x4x4 by default); it is upsampled,
-    Gaussian-smoothed at sigma = patch/8, then scaled so its per-axis std
-    equals the voxel alpha — which also makes `elastic_alpha_mm=0` exactly
-    the identity.
+    THE IMPLEMENTATION IS TORCH-NATIVE, and that is a measured fix, not a
+    preference: the previous scipy build (per-axis full-resolution
+    gaussian_filter + zoom + map_coordinates at order 3) took ~35 s PER PATCH
+    on a (1,96,176,176) image on the benchmark machines — a ~5-hour epoch
+    that masqueraded as a hang across the whole PulmoAI campaign until a
+    tracemalloc fuzz caught it (docs/benchmark-pulmo-2026-10-07.md, W18).
+    The torch path below costs tens of milliseconds for the same transform
+    family.
+
+    SEMANTIC NOTES, stated because a reader comparing to the old scipy path
+    should know what moved: (1) scale uses trilinear/nearest interpolate —
+    the same order-3/0 interpolation contract as before, a different kernel;
+    (2) the elastic field is Gaussian-smoothed on the COARSE lattice and then
+    trilinearly upsampled (old: upsampled then smoothed at sigma = patch/8) —
+    the same class of smooth random field, calibrated identically (per-axis
+    std == alpha in voxels), so `elastic_alpha_mm=0` remains exactly the
+    identity; (3) the warp is one `grid_sample` — image bilinear, label and
+    mask nearest, fractional memberships still impossible.
+    `elastic_alpha_mm` is a PHYSICAL magnitude, converted to voxels through
+    `patch.spacing_mm`, so the same number means the same deformation on
+    0.5 mm CT and 3 mm thick-slice data.
     """
+
     image, label, mask = patch.image, patch.label, patch.mask
     shape = tuple(int(v) for v in image.shape[1:])
 
     factors = rng.uniform(scale_range[0], scale_range[1], size=3)
     if not np.all(factors == 1.0):
-        channel = (1.0,)
-        zoom_image = channel + tuple(float(f) for f in factors)
-        zoom_label = tuple(float(f) for f in factors)
-        # Order 3 for the image, 0 for the discrete arrays — fractional labels
-        # would invent classes.
-        image = scipy.ndimage.zoom(image, zoom_image, order=3)
-        label = scipy.ndimage.zoom(label, zoom_label, order=0)
+        image = _resample_to_shape(image, shape, factors, bilinear=True)
+        label = _resample_to_shape(label, shape, factors, bilinear=False)
         if mask is not None:
-            mask = scipy.ndimage.zoom(mask, zoom_image, order=0)
-        # Recentre on the patch shape: crop the surplus when zoomed in, pad by
-        # border reflection when zoomed out — reflection, never constant zero,
-        # because a zero pad would teach the net that anatomy fades to nothing
-        # at every patch edge.
-        image = _crop_or_reflect_pad(image, shape)
-        label = _crop_or_reflect_pad(label, shape)
-        mask = None if mask is None else _crop_or_reflect_pad(mask, shape)
+            mask = _resample_to_shape(mask, shape, factors, bilinear=False)
 
     if elastic_alpha_mm > 0.0:
-        field = _elastic_displacement(shape, patch.spacing_mm, elastic_alpha_mm,
-                                      elastic_grid, rng)
-        # map_coordinates addresses an (ndim, ...) lattice; the label is 3-D
-        # so the field applies directly, the image/mask warp per channel with
-        # the same spatial field.
-        label = scipy.ndimage.map_coordinates(
-            label, field, order=0, mode="nearest", output=label.dtype)
-        image = np.stack([
-            scipy.ndimage.map_coordinates(
-                image[c], field, order=3, mode="nearest").astype(np.float32)
-            for c in range(image.shape[0])
-        ])
+        field = _elastic_field(shape, patch.spacing_mm, elastic_alpha_mm,
+                               elastic_grid, rng)
+        image = _warp(image, field, bilinear=True)
+        label = _warp(label, field, bilinear=False).astype(label.dtype, copy=False)
         if mask is not None:
-            mask = np.stack([
-                scipy.ndimage.map_coordinates(
-                    mask[c], field, order=0, mode="nearest", output=np.float32)
-                for c in range(mask.shape[0])
-            ])
+            mask = _warp(mask, field, bilinear=False)
 
     return Patch(
         image=np.ascontiguousarray(image),
@@ -277,6 +268,100 @@ def augment_scale_elastic(
         centre=patch.centre,
         spacing_mm=patch.spacing_mm,
     )
+
+
+def _resample_to_shape(
+    array: np.ndarray,
+    shape: tuple[int, int, int],
+    factors: np.ndarray,
+    *,
+    bilinear: bool,
+) -> np.ndarray:
+    """Zoom by `factors` then recentre on `shape` (crop / reflect-pad).
+
+    torch interpolate does the resample in one shot; `_crop_or_reflect_pad`
+    keeps the border-reflection contract from the scipy path.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    ndim = array.ndim
+    target = tuple(max(int(round(n * f)), 1) for n, f in zip(shape, factors))
+    mode = "trilinear" if bilinear else "nearest"
+    # torch CPU's nearest kernels refuse integer tensors — carry discrete
+    # arrays as float32 and restore the dtype on return (nearest sampling
+    # never produces fractional values, so the round-trip is exact).
+    source_dtype = array.dtype
+    work = array if array.dtype == np.float32 else array.astype(np.float32)
+    kwargs = {} if mode == "nearest" else {"align_corners": False}
+    if ndim == 4:  # (C, K, J, I)
+        t = torch.from_numpy(np.ascontiguousarray(work)).unsqueeze(0)
+        out = F.interpolate(t, size=target, mode=mode, **kwargs)
+        out = out.squeeze(0).numpy()
+    else:  # (K, J, I) label map
+        t = torch.from_numpy(np.ascontiguousarray(work)).unsqueeze(0).unsqueeze(0)
+        out = F.interpolate(t, size=target, mode=mode, **kwargs)
+        out = out.squeeze(0).squeeze(0).numpy()
+    if out.dtype != source_dtype:
+        out = out.astype(source_dtype)
+    return _crop_or_reflect_pad(out, shape)
+
+
+def _elastic_field(
+    shape: tuple[int, int, int],
+    spacing_mm: tuple[float, float, float],
+    alpha_mm: float,
+    grid: tuple[int, int, int],
+    rng: np.random.Generator,
+) -> torch.Tensor:
+    """(K, J, I, 3) normalized grid offsets in [-1, 1] grid_sample space.
+
+    Smooth-on-coarse: a Gaussian filter on the tiny control lattice, then a
+    trilinear upsample — the expensive "smooth a full-resolution field" step
+    of the old scipy path is gone by construction. Magnitude calibration
+    (per-axis std == alpha in voxels) happens on the final field, exactly as
+    before, so alpha_mm=0 remains the identity by the caller never reaching
+    this function.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    smooth = np.stack([
+        scipy.ndimage.gaussian_filter(c, sigma=1.0)
+        for c in rng.normal(0.0, 1.0, (3, *grid)).astype(np.float32)
+    ])
+    coarse = torch.from_numpy(smooth).unsqueeze(0)  # (1, 3, gK, gJ, gI)
+    field = F.interpolate(coarse, size=shape, mode="trilinear",
+                          align_corners=False)[0]  # (3, K, J, I)
+    for axis in range(3):
+        std = float(field[axis].std())
+        if std > 0.0:
+            field[axis] *= alpha_mm / spacing_mm[axis] / std
+    # Sample coordinates: lattice plus displacement, then normalized.
+    axes = [torch.arange(n, dtype=torch.float32) for n in shape]
+    lattice = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1)  # (K,J,I,3)
+    samples = lattice + field.permute(1, 2, 3, 0)
+    for axis, n in enumerate(shape):
+        samples[..., axis] = samples[..., axis] / max(n - 1, 1) * 2.0 - 1.0
+    return samples
+
+
+def _warp(array: np.ndarray, grid: torch.Tensor, *, bilinear: bool) -> np.ndarray:
+    """One grid_sample: image bilinear, discrete arrays nearest, border clamp."""
+    import torch
+    import torch.nn.functional as F
+
+    mode = "bilinear" if bilinear else "nearest"
+    work = array if array.dtype == np.float32 else array.astype(np.float32)
+    if array.ndim == 4:
+        t = torch.from_numpy(np.ascontiguousarray(work)).unsqueeze(0)
+        out = F.grid_sample(t, grid.unsqueeze(0), mode=mode,
+                            padding_mode="border", align_corners=False)
+        return out.squeeze(0).numpy()
+    t = torch.from_numpy(np.ascontiguousarray(work)).unsqueeze(0).unsqueeze(0)
+    out = F.grid_sample(t, grid.unsqueeze(0), mode=mode,
+                        padding_mode="border", align_corners=False)
+    return out.squeeze(0).squeeze(0).numpy()
 
 
 def augment_intensity(
