@@ -177,6 +177,12 @@ class PlannedRun:
             # that teaches scale and deformation invariance. Hand-written
             # FitPlans default it off and keep their byte-exact dynamics.
             augment_resample=True,
+            # and a real plan PREFETCHES: the producer thread overlaps patch
+            # sampling/augmentation with the GPU step (see prefetch.py) —
+            # the benchmark measured ~0.3-0.5 s/step of CPU work the GPU
+            # waited on. Hand-written FitPlans keep 0 (byte-exact, the test
+            # suite's reproducible path).
+            prefetch_batches=4,
         )
 
     @property

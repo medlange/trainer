@@ -30,6 +30,7 @@ a scaler, so the CPU path is the same arithmetic it always was.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +49,7 @@ from medos_trainer.vanilla.distributed import (
 )
 from medos_trainer.vanilla.losses import MaskedSegmentationLoss
 from medos_trainer.vanilla.nets import VanillaUNet
+from medos_trainer.vanilla.prefetch import BatchPrefetcher
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,16 @@ class FitPlan:
     optimizer EVERY TRAINING STEP. Validation happens in `__post_init__`
     because the dataclass is frozen: an unknown value is refused at
     construction (naming the choices), never patched in afterwards.
+    `prefetch_batches` is the data-pipeline overlap: 0 keeps the current
+    INLINE sampling loop — the byte-identical, fresh-from-seed-reproducible
+    path every existing test pins — and N > 0 runs sampling, augmentation and
+    batch stacking on ONE daemon producer thread (see
+    vanilla/prefetch.py), N batches ahead, so on GPU the patch pipeline
+    overlaps the CUDA work instead of blocking it. PREFETCHING CHANGES THE
+    SAMPLE STREAM: the producer owns a generator spawned from the fit's rng
+    (documented in `fit`), so same-seed inline and prefetch runs see
+    different patches — the same honesty nnU-Net's dataloader workers carry,
+    and why prefetch off is the path tests and reproducibility claims use.
     """
 
     patch_size: tuple[int, int, int]
@@ -81,6 +93,7 @@ class FitPlan:
     augment_resample: bool = False
     use_amp: bool = False
     lr_schedule: str = "plateau"
+    prefetch_batches: int = 0
 
     def __post_init__(self) -> None:
         if self.lr_schedule not in ("plateau", "poly"):
@@ -88,6 +101,41 @@ class FitPlan:
                 f"lr_schedule must be one of ('plateau', 'poly'), "
                 f"got {self.lr_schedule!r}"
             )
+        if self.prefetch_batches < 0:
+            raise ValueError(
+                f"prefetch_batches is a queue depth (0 = inline sampling), "
+                f"not a negative number: {self.prefetch_batches}"
+            )
+
+
+def _batch_factory(
+    cases: list[Case], plan: FitPlan, rng: np.random.Generator
+) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray | None]]:
+    """THE PREFETCH PRODUCER'S BODY: an endless stream of training batches.
+
+    Runs on the BatchPrefetcher's daemon thread, never on the training
+    thread. THREAD-SAFETY CONTRACT: it reads ONLY `cases` and `plan` — it
+    builds its OWN PatchSampler because the trainer's sampler is shared with
+    `validate`, which runs on the main thread between epochs, and two
+    threads touching one sampler's foreground cache would be a race. It must
+    never touch the net, the optimizer, or any other training-thread state.
+
+    The draw ORDER replicates the inline loop exactly — case index, patch
+    sample, mirror/rotate, then the scale/elastic pair when the plan asks —
+    so the two paths differ only in WHICH generator the draws come from,
+    never in what a draw means. Only `rng` differs: the producer owns its
+    own generator, spawned from the fit's rng by `fit` (documented there).
+    """
+    sampler = PatchSampler(plan.patch_size, foreground_prob=plan.foreground_prob)
+    while True:
+        patches = [
+            sampler.sample(cases[int(rng.integers(0, len(cases)))], rng)
+            for _ in range(plan.batch_size)
+        ]
+        patches = [augment_mirror_rotate(p, rng) for p in patches]
+        if plan.augment_resample:
+            patches = [augment_scale_elastic(p, rng) for p in patches]
+        yield make_batch(patches)
 
 
 class VanillaTrainer:
@@ -110,6 +158,15 @@ class VanillaTrainer:
             from torch.nn.parallel import DistributedDataParallel
 
             self.net = DistributedDataParallel(self.net)
+        # TF32 ON CUDA — THE FREE 3-5x nnU-Net ALREADY TAKES. PyTorch ships
+        # with cudnn.allow_tf32=False; nnU-Net's trainer enables it, and on
+        # Ampere+ cards conv3d in TF32 is 3-5x faster with no measurable
+        # quality change at this scale. We leave fp32 math untouched on CPU
+        # (flag is CUDA-only) and document that a run is TF32 so a reviewer
+        # reproducing bit-exact numbers knows where the last ulp went.
+        if device.startswith("cuda"):
+            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cuda.matmul.allow_tf32 = True
         self.criterion = MaskedSegmentationLoss(num_classes=num_classes)
         self.optimizer = torch.optim.SGD(
             net.parameters(), lr=plan.learning_rate,
@@ -229,6 +286,21 @@ class VanillaTrainer:
         identical on every rank at every epoch boundary: poly because it is a
         pure function of progress, plateau because rank 0 broadcasts the
         scheduled value with the gradients.
+
+        PREFETCH (plan.prefetch_batches > 0): sampling, augmentation and
+        batch stacking move onto one daemon producer thread that stays
+        `prefetch_batches` deep ahead of the training loop (the WHY is
+        prefetch.py's docstring). THE SAMPLE STREAM CHANGES, honestly and on
+        purpose: the producer cannot share the caller's generator with the
+        inline draws (it runs on another thread, and a generator is not
+        thread-safe), so `fit` draws ONE entropy integer from `rng` and spawns
+        the producer's generator from it. Same seed + prefetch off replays
+        exactly as it always did; same seed + prefetch on is a DIFFERENT
+        honest run — the same trade nnU-Net's dataloader workers make — while
+        validation keeps drawing from `rng` itself on this thread. Everything
+        else — train_step, the lr laws, checkpoint selection, DDP semantics —
+        is identical between the two paths; under DDP each rank's producer
+        inherits its rank-seeded `rng` exactly like the inline path does.
         """
         start_epoch = 0
         best = float("inf")
@@ -236,68 +308,88 @@ class VanillaTrainer:
             start_epoch = int(resume["epoch"]) + 1
             best = float(resume["best_val_masked_dice_loss"])
         history: list[dict] = []
-        for epoch in range(start_epoch, self.plan.epochs):
-            losses = []
-            for step in range(self.plan.steps_per_epoch):
-                cases = train_cases
-                patches = [
-                    self.sampler.sample(cases[int(rng.integers(0, len(cases)))], rng)
-                    for _ in range(self.plan.batch_size)
-                ]
-                patches = [augment_mirror_rotate(p, rng) for p in patches]
-                if self.plan.augment_resample:
-                    patches = [augment_scale_elastic(p, rng) for p in patches]
-                images, labels, masks = make_batch(patches)
-                losses.append(self.train_step(
-                    torch.as_tensor(images, device=self.device),
-                    torch.as_tensor(labels, device=self.device),
-                    None if masks is None else torch.as_tensor(masks, device=self.device),
-                ))
-                # THE POLY LAW MOVES EVERY STEP; the plateau law never touches
-                # the lr here — its step happens once per epoch, below, fed by
-                # the validation loss it exists to watch.
-                if self.plan.lr_schedule == "poly":
-                    self._set_poly_lr(epoch, step)
-            # RANK 0 OWNS VALIDATION, because every rank's net holds identical
-            # weights (DDP all-reduce guarantees it) — validating on all ranks
-            # would run the same patches the same number of times and report
-            # the same number, quadrupled work for zero information. The lr
-            # law is unaffected: poly is a pure function of progress and the
-            # plateau scheduler lives behind the same main-process guard it
-            # always lived behind (it was always fed by validation).
-            if is_main_process():
-                val = self.validate(val_cases, rng)
-                if self.scheduler is not None:
-                    self.scheduler.step(val)
-                record = {"epoch": epoch, "loss": float(np.mean(losses)),
-                          "val_masked_dice_loss": val,
-                          "lr": self.optimizer.param_groups[0]["lr"]}
-                history.append(record)
-                if val < best:
-                    best = val
-                    if out_dir is not None:
-                        self.save_checkpoint(out_dir, record)
-            if self.distributed:
-                import torch.distributed as dist
+        prefetcher: BatchPrefetcher | None = None
+        if self.plan.prefetch_batches > 0:
+            producer_rng = np.random.default_rng(
+                np.random.SeedSequence(int(rng.integers(0, 2**31))).spawn(1)[0]
+            )
+            prefetcher = BatchPrefetcher(
+                lambda: _batch_factory(train_cases, self.plan, producer_rng),
+                queue_size=self.plan.prefetch_batches,
+            )
+        try:
+            for epoch in range(start_epoch, self.plan.epochs):
+                losses = []
+                for step in range(self.plan.steps_per_epoch):
+                    if prefetcher is not None:
+                        images, labels, masks = next(prefetcher)
+                    else:
+                        cases = train_cases
+                        patches = [
+                            self.sampler.sample(cases[int(rng.integers(0, len(cases)))], rng)
+                            for _ in range(self.plan.batch_size)
+                        ]
+                        patches = [augment_mirror_rotate(p, rng) for p in patches]
+                        if self.plan.augment_resample:
+                            patches = [augment_scale_elastic(p, rng) for p in patches]
+                        images, labels, masks = make_batch(patches)
+                    losses.append(self.train_step(
+                        torch.as_tensor(images, device=self.device),
+                        torch.as_tensor(labels, device=self.device),
+                        None if masks is None else torch.as_tensor(masks, device=self.device),
+                    ))
+                    # THE POLY LAW MOVES EVERY STEP; the plateau law never touches
+                    # the lr here — its step happens once per epoch, below, fed by
+                    # the validation loss it exists to watch.
+                    if self.plan.lr_schedule == "poly":
+                        self._set_poly_lr(epoch, step)
+                # RANK 0 OWNS VALIDATION, because every rank's net holds identical
+                # weights (DDP all-reduce guarantees it) — validating on all ranks
+                # would run the same patches the same number of times and report
+                # the same number, quadrupled work for zero information. The lr
+                # law is unaffected: poly is a pure function of progress and the
+                # plateau scheduler lives behind the same main-process guard it
+                # always lived behind (it was always fed by validation).
+                if is_main_process():
+                    val = self.validate(val_cases, rng)
+                    if self.scheduler is not None:
+                        self.scheduler.step(val)
+                    record = {"epoch": epoch, "loss": float(np.mean(losses)),
+                              "val_masked_dice_loss": val,
+                              "lr": self.optimizer.param_groups[0]["lr"]}
+                    history.append(record)
+                    if val < best:
+                        best = val
+                        if out_dir is not None:
+                            self.save_checkpoint(out_dir, record)
+                if self.distributed:
+                    import torch.distributed as dist
 
-                # THE PLATEAU LAW UNDER DDP: rank 0 is the only rank that sees
-                # validation, so it is the only rank whose scheduler moves —
-                # but DDP keeps weights identical only while every rank's
-                # optimizer steps with the SAME lr. The scheduled lr therefore
-                # travels with the gradients: rank 0's value is broadcast and
-                # every rank adopts it before the next epoch. Poly needs no
-                # such courier — its lr is the same pure function of progress
-                # on every rank — but the broadcast is uniform and cheap.
-                lr_now = torch.tensor(
-                    [self.optimizer.param_groups[0]["lr"]], device=self.device
-                )
-                dist.broadcast(lr_now, src=0)
-                for group in self.optimizer.param_groups:
-                    group["lr"] = float(lr_now.item())
-                # Keep the ranks in lockstep: with identical step counts the
-                # loop cannot skew, but a barrier makes "cannot" a guarantee
-                # (and covers the epoch where validation time differs most).
-                dist.barrier()
+                    # THE PLATEAU LAW UNDER DDP: rank 0 is the only rank that sees
+                    # validation, so it is the only rank whose scheduler moves —
+                    # but DDP keeps weights identical only while every rank's
+                    # optimizer steps with the SAME lr. The scheduled lr therefore
+                    # travels with the gradients: rank 0's value is broadcast and
+                    # every rank adopts it before the next epoch. Poly needs no
+                    # such courier — its lr is the same pure function of progress
+                    # on every rank — but the broadcast is uniform and cheap.
+                    lr_now = torch.tensor(
+                        [self.optimizer.param_groups[0]["lr"]], device=self.device
+                    )
+                    dist.broadcast(lr_now, src=0)
+                    for group in self.optimizer.param_groups:
+                        group["lr"] = float(lr_now.item())
+                    # Keep the ranks in lockstep: with identical step counts the
+                    # loop cannot skew, but a barrier makes "cannot" a guarantee
+                    # (and covers the epoch where validation time differs most).
+                    dist.barrier()
+        finally:
+            # The producer is a daemon (process exit is safe without this),
+            # but a fit that ends — normally, on an exception, or on the
+            # consumer side of a failed factory — should release its thread
+            # and its queued batches promptly in a long-lived process.
+            if prefetcher is not None:
+                prefetcher.close()
         return {"best_val_masked_dice_loss": best, "history": history}
 
     def save_checkpoint(self, out_dir: str | Path, record: dict) -> Path:

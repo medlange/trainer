@@ -124,7 +124,13 @@ def test_imports_are_vanilla() -> None:
                "scipy",
                # hashlib: the export manifest digests model.pt (sha256). Stdlib,
                # deterministic, no framework — same family as json/time above.
-               "hashlib"}
+               "hashlib",
+               # threading + queue: the batch prefetcher's whole mechanism
+               # (vanilla/prefetch.py) — ONE daemon producer thread moving
+               # sampled/augmented batches through a bounded queue, the
+               # stdlib half of torch DataLoader's pin-memory-thread pattern.
+               # Stdlib, no framework — the gate keeps nnU-Net/MONAI out.
+               "threading", "queue"}
     # THE LAZY SET: function-level imports the optional extras demand. Each
     # entry exists ONLY as `import <name>` inside the one function that needs
     # it, and that function refuses with a named RuntimeError when absent.

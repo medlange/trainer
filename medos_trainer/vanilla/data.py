@@ -90,6 +90,16 @@ class PatchSampler:
             raise ValueError(f"foreground_prob in [0, 1], got {foreground_prob}")
         self.patch_size = patch_size
         self.foreground_prob = foreground_prob
+        # FOREGROUND-COORDINATE CACHE: _centre used to run np.argwhere over
+        # the whole labelled region on EVERY foreground-biased draw — tens of
+        # milliseconds per patch on real CT, paid per training step. The
+        # region is a per-case constant, so it is computed once here and
+        # keyed by case identity. Keyed by case_id (not id(case)): the fit
+        # path resamples cases into NEW objects per run, and id() reuse would
+        # serve stale coordinates; case_id is the stable identity within a
+        # run. Entries are dropped when a case with the same id re-registers
+        # (a re-sampled case recomputes once).
+        self._fg_cache: dict[str, np.ndarray | None] = {}
 
     def sample(self, case: Case, rng: np.random.Generator) -> Patch:
         shape = case.image.shape[1:]
@@ -103,17 +113,29 @@ class PatchSampler:
             spacing_mm=case.spacing_mm,
         )
 
+    def _foreground_coords(self, case: Case) -> np.ndarray | None:
+        if not case.case_id:
+            # Anonymous cases (the default) get no cache entry: the key has
+            # no identity, and a collision would serve another case's
+            # foreground to this one.
+            region = case.label > 0
+            if case.mask is not None:
+                region = region & (case.mask.max(axis=0) > 0)
+            return np.argwhere(region) if region.any() else None
+        if case.case_id not in self._fg_cache:
+            region = case.label > 0
+            if case.mask is not None:
+                region = region & (case.mask.max(axis=0) > 0)
+            self._fg_cache[case.case_id] = np.argwhere(region) if region.any() else None
+        return self._fg_cache[case.case_id]
+
     def _centre(self, case: Case, rng: np.random.Generator) -> tuple[int, int, int]:
         fg = None
         if rng.random() < self.foreground_prob:
             # Labelled foreground: label > 0 AND, when a mask exists, labelled
             # in it — an annotated case's unlabelled voxels are not foreground
             # for sampling either.
-            region = case.label > 0
-            if case.mask is not None:
-                region = region & (case.mask.max(axis=0) > 0)
-            if region.any():
-                fg = np.argwhere(region)
+            fg = self._foreground_coords(case)
         if fg is None or not len(fg):
             return tuple(int(rng.integers(0, n)) for n in case.image.shape[1:])
         return tuple(int(x) for x in fg[rng.integers(0, len(fg))])
