@@ -130,7 +130,7 @@ the task and classes identical at 1/5th the voxels.
 | Medlange (preprocessing W16, plain net) | 5 epochs | 0.000 |
 | Medlange (residual + DS weights) | 5 epochs | 0.000 |
 | Medlange (residual + DS weights + TF32/AMP/prefetch) | 40 epochs | **0.456** |
-| Medlange (same stack) | 100 epochs | **pending** |
+| Medlange (same stack) | 100 epochs | aborted at epoch 48 (val 0.363, still improving) — the shared box entered a multi-hour CPU stall phase it also showed earlier; environmental, not a training failure |
 | wall clock per epoch (crops) | ~50 s | ~75 s (was ~10 min before the throughput stack) |
 
 Findings this cycle:
@@ -151,7 +151,23 @@ Findings this cycle:
   redundant per-step argwhere. TF32 is the free 3-5x conv multiplier
   nnU-Net already takes.
 
-## Next (roadmap W18)
+## W18 (open)
+
+1. THE EPOCH-STALL PATHOLOGY: periodically an epoch goes from ~75 s to 20+
+   minutes at 100%+ CPU with no checkpoint progress (seen on both the local
+   box and the shared lab, always mid-run). No py-spy/strace access on the
+   shared box to catch it in the act. Suspects to check first on an owned
+   machine: (a) python GC gen-2 scanning the prefetch queue's ~1 GB of
+   stacked batches; (b) a torch CPU-tensor allocation stall next to tenant
+   memory pressure; (c) a prefetch-thread/main-thread GIL convoy. Reproduce
+   with `PYTHONMALLOC=debug`, `gc.set_debug`, and `faulthandler.dump_traceback_later`
+   armed from fit start.
+2. Sample-efficiency: at ~equal wall-clock Medlange converges to ~0.46 vs
+   nnU-Net's ~0.78 on crops. Next levers, in order: intensity augmentations
+   (nnU-Net's gamma/contrast/brightness — they regularize AND effectively
+   extend the dataset; ours has none), batch size (ours 2, theirs 2-12 via
+   plans), and 1000-epoch confirmation runs on a quiet machine.
+
 
 Fingerprint foreground-intensity statistics + dataset z-score normalisation;
 resampling to median spacing in the pipeline; dataloader workers for the
