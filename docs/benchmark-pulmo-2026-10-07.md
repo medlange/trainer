@@ -129,7 +129,9 @@ the task and classes identical at 1/5th the voxels.
 | **nnU-Net 3d_fullres (crops)** | **50 epochs** | **0.782** |
 | Medlange (preprocessing W16, plain net) | 5 epochs | 0.000 |
 | Medlange (residual + DS weights) | 5 epochs | 0.000 |
-| Medlange (residual + DS weights + TF32/AMP/prefetch) | 40 epochs | **pending** |
+| Medlange (residual + DS weights + TF32/AMP/prefetch) | 40 epochs | **0.456** |
+| Medlange (same stack) | 100 epochs | **pending** |
+| wall clock per epoch (crops) | ~50 s | ~75 s (was ~10 min before the throughput stack) |
 
 Findings this cycle:
 - THE RESAMPLING AUGMENTATION WAS THE WALL-CLOCK KILLER, not a quality
