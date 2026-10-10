@@ -135,3 +135,17 @@ def test_fingerprint_is_frozen() -> None:
     fp = collect_fingerprint(_cases())
     with pytest.raises(AttributeError):
         fp.median_shape = (1, 1, 1)  # type: ignore[misc]
+
+
+def test_six_stage_preset_rounds_the_patch_to_its_pooling_stride() -> None:
+    """A 6-stage net pools 32x; its patch must be a 32-multiple or the
+    bottleneck rags. The xlarge preset exists for the capacity comparison
+    against nnU-Net's 6-level default."""
+    fp = collect_fingerprint(_cases(spacing=(0.7, 0.7, 0.7)))
+    plan = plan_from_fingerprint(fp, "xlarge")
+    stride = 2 ** (len(plan.preset.features) - 1)
+    assert all(p % stride == 0 for p in plan.patch_size)
+    assert len(plan.preset.features) == 6
+    # five-stage presets keep their historical 16-rounding
+    plan5 = plan_from_fingerprint(fp, "large")
+    assert all(p % 16 == 0 for p in plan5.patch_size)

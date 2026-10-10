@@ -128,6 +128,12 @@ PRESETS: dict[str, VramPreset] = {
     "large": VramPreset("large", features=(32, 64, 128, 256, 320), batch_size=4,
                         voxel_budget=160 * 160 * 112,
                         target_patch_mm=(80.0, 140.0, 140.0)),
+    # SIX STAGES — nnU-Net-class depth. Needs the stride-aware patch
+    # rounding above (32x pooling); the 32 GB card takes batch 2 at the
+    # shrunk-budget patch. Benchmarked against `large` in the next phase.
+    "xlarge": VramPreset("xlarge", features=(32, 64, 128, 256, 320, 320),
+                         batch_size=2, voxel_budget=160 * 160 * 112,
+                         target_patch_mm=(80.0, 140.0, 140.0)),
 }
 
 
@@ -317,8 +323,12 @@ def collect_fingerprint(cases: list[Case]) -> Fingerprint:
     )
 
 
-def _round_to_stride(voxels: float) -> int:
-    return max(PATCH_ROUNDING, int(round(voxels / PATCH_ROUNDING)) * PATCH_ROUNDING)
+def _round_to_stride(voxels: float, stride: int = PATCH_ROUNDING) -> int:
+    # Rounded to the net's pooling multiple, floored at the historical 16 —
+    # and the floor itself must be a multiple of `stride`, so a 6-stage net
+    # never gets a 16-voxel patch (not a 32-multiple).
+    floor = max(PATCH_ROUNDING, stride)
+    return max(floor, int(round(voxels / stride)) * stride)
 
 
 def plan_from_fingerprint(
@@ -363,7 +373,12 @@ def plan_from_fingerprint(
             f"voxel count {int(voxel_count)} exceeds preset {p.name}'s budget "
             f"{p.voxel_budget}; shrunk by {factor:.3f}^3",
         )
-    patch = tuple(_round_to_stride(v) for v in voxel_patch)
+    # THE PATCH MUST BE A MULTIPLE OF THE NET'S TOTAL POOLING STRIDE —
+    # 2^(stages-1): a 6-stage net pools 32x, and a patch rounded only to 16
+    # rags the bottleneck. Five stages (the historical presets) pool 16x,
+    # which is why the constant was hard-coded until the xlarge preset.
+    stride = 2 ** (len(p.features) - 1)
+    patch = tuple(_round_to_stride(v, stride) for v in voxel_patch)
 
     # STEM STRIDE from anisotropy: through-plane spacing twice the in-plane
     # means the K axis carries half the information per voxel; the stem
