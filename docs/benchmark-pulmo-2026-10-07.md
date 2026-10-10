@@ -341,16 +341,26 @@ epochs, deployment selection, AMP. Expected finish ~13:00-15:00;
 mean±std of the two seeds against nnU-Net 0.849 (250 ep) /
 0.756-0.782 (50 ep) is the number this campaign reports next.
 
-OPEN DEFECT: the prefetch-producer CPU-conv vs AMP-CUDA-sync deadlock.
-MITIGATION SHIPPED SAME DAY (W21b): `_gaussian_blur3d` no longer runs a
-torch grouped conv3d on the producer thread — it calls the reference it
-always claimed to match, `scipy.ndimage.gaussian_filter`, which executes
-outside torch's process-global OMP pool and so cannot interlock with the
-CUDA-side wait. THE ROOT CAUSE IS STILL NOT PROVEN: the stack evidence put
-the producer inside that conv, but one sample of a race is a suspect, not a
-verdict. Until a reproduction on an owned machine confirms the mechanism,
-treat the full-parity configuration as mitigated-but-unproven; the opt-out
-stays, and the texture tier keeps its plan default ON.
+OPEN DEFECT: the prefetch/AMP deadlock — SECOND OCCURRENCE KILLED THE
+TEXTURE THEORY (2026-10-11, ~01:40, W21c). The intensity-only rerun (seed 0,
+NO texture, NO resample augmentation — the configuration chosen BECAUSE it
+was "safe") deadlocked at ~epoch 45 with the SAME main-thread stack —
+`GradScaler._maybe_opt_step` → `found_inf` `.item()` CUDA sync, GPU idle —
+while the producer thread was in `queue.put` backpressure, NOT inside any
+augmentation. One occurrence with the producer in the blur conv was a
+suspect; two occurrences with different producer sites say the producer is
+collateral and the hang is the device sync itself. PRIME SUSPECT NOW: the
+AMP scaler's synchronizing path on torch 2.14.1+cu130 / RTX 5090
+(Blackwell) — every pre-AMP campaign run finished multi-hour unattended;
+both confirmed hangs are scaler-site, non-deterministic, GPU idle with no
+kernel in flight. MITIGATIONS SHIPPED/SCHEDULED: (a) W21b moved the gaussian
+blur off torch conv3d (kept — it is the better implementation anyway);
+(b) the seed-0 arm was restarted fp32 + TF32 matmuls, native allocator
+(no `expandable_segments`), no GradScaler — the configuration class that
+never hung; seed 1 continues on AMP as the comparison arm. HONEST STATUS:
+mitigated by configuration, root cause unproven — a minimal AMP-only
+reproduction and a torch bug report remain open; do not re-enable AMP on
+this box until that repro lands.
 
 ## W18 (stalls root-caused 2026-10-10; one new stall mode 2026-10-11 — see W21)
 
