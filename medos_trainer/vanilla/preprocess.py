@@ -46,7 +46,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-import scipy.ndimage
 from medos_trainer.vanilla.data import Case
 
 #: A case whose spacing is closer to the target than this (numpy allclose,
@@ -72,9 +71,35 @@ def resample(
     by `SlidingWindowPredictor.predict`, FORWARD for the image and BACK for
     the probability map.
     """
+    # TORCH, NOT SCIPY — and this is a measured fix, the third instance of
+    # the same disease: scipy.ndimage.zoom at order 3 took tens of seconds
+    # per volume on the benchmark machines (the elastic augmentation was the
+    # first catch, selection's per-epoch preprocessing the third), during
+    # which the run looked hung. torch.interpolate does the same resampling
+    # family in ~100 ms. order 3 (cubic spline) -> trilinear, order 0
+    # (nearest) -> nearest; a different kernel, the same interpolation
+    # contract (the image continuous, the discrete arrays exact).
+    import torch
+    import torch.nn.functional as F
+
     factors = tuple(f / t for f, t in zip(from_spacing, to_spacing))
-    zoom = (1.0,) + factors if array.ndim == 4 else factors
-    return scipy.ndimage.zoom(array, zoom, order=order)
+    target = tuple(max(int(round(n * f)), 1)
+                   for n, f in zip(array.shape[-3:], factors))
+    mode = "trilinear" if order >= 2 else "nearest"
+    kwargs = {} if mode == "nearest" else {"align_corners": False}
+    source_dtype = array.dtype
+    work = array if array.dtype == np.float32 else array.astype(np.float32)
+    if array.ndim == 4:
+        t_arr = torch.from_numpy(np.ascontiguousarray(work)).unsqueeze(0)
+        out = F.interpolate(t_arr, size=target, mode=mode, **kwargs)
+        out = out.squeeze(0).numpy()
+    else:
+        t_arr = torch.from_numpy(np.ascontiguousarray(work)).unsqueeze(0).unsqueeze(0)
+        out = F.interpolate(t_arr, size=target, mode=mode, **kwargs)
+        out = out.squeeze(0).squeeze(0).numpy()
+    if out.dtype != source_dtype:
+        out = out.astype(source_dtype)
+    return out
 
 
 def resample_case(case: Case, to_spacing: tuple[float, float, float]) -> Case:
