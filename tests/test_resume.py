@@ -71,18 +71,19 @@ def test_save_and_load_state_restores_optimizer_and_scheduler(tmp_path) -> None:
 
 def test_fit_command_resume_continues_epoch_numbering_and_best(tmp_path,
                                                                monkeypatch) -> None:
-    """With validation (a LOSS — lower is better) driven deterministically
-    downward, the resumed run's checkpoint must be its last epoch and history
-    must hold all four."""
+    """With the selection score (volume foreground Dice — HIGHER is better)
+    driven deterministically upward, the resumed run's checkpoint must be its
+    last epoch and history must hold all four."""
     cases = _write_cases(tmp_path)
     bundle = tmp_path / "bundle"
 
-    vals = iter([0.40, 0.30, 0.20, 0.10])
+    dices = iter([0.10, 0.20, 0.30, 0.40])
 
-    def fake_validate(self, cases, rng, patches_per_case=2):
-        return next(vals)
+    def fake_volume_selection(self, val_cases):
+        return next(dices)
 
-    monkeypatch.setattr(VanillaTrainer, "validate", fake_validate)
+    monkeypatch.setattr(VanillaTrainer, "volume_selection_score",
+                        fake_volume_selection)
 
     first = fit_command(cases, "cpu", bundle, epochs=2, steps_per_epoch=1, seed=0)
     assert (bundle / "training_state.pt").is_file()
@@ -98,18 +99,18 @@ def test_fit_command_resume_continues_epoch_numbering_and_best(tmp_path,
     assert [r["epoch"] for r in second["history"]] == [2, 3]
     record = json.loads((bundle / "checkpoint.json").read_text(encoding="utf-8"))
     assert record["epoch"] == 3
-    assert record["val_masked_dice_loss"] == pytest.approx(0.10)
+    assert record["selection_score"] == pytest.approx(0.40)
     # The run-wide best is the checkpoint's, and the summary agrees.
-    assert second["best_val_masked_dice_loss"] == pytest.approx(0.10)
+    assert second["best_selection_score"] == pytest.approx(0.40)
 
 
 def test_resume_cli_smoke(tmp_path, monkeypatch) -> None:
     cases = _write_cases(tmp_path)
     bundle = tmp_path / "bundle"
-    vals = iter([0.4, 0.3, 0.2, 0.1])
+    dices = iter([0.1, 0.2, 0.3, 0.4])
     monkeypatch.setattr(
-        VanillaTrainer, "validate",
-        lambda self, c, rng, patches_per_case=2: next(vals),
+        VanillaTrainer, "volume_selection_score",
+        lambda self, val_cases: next(dices),
     )
     rc = main(["vanilla-fit", "--data", str(cases), "--preset", "cpu",
                "--out", str(bundle), "--epochs", "2", "--steps-per-epoch", "1"])

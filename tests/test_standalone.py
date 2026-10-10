@@ -62,7 +62,10 @@ def test_fit_command_trains_and_writes_a_bundle(tmp_path) -> None:
     assert (bundle / "model.pt").is_file()
     assert (bundle / "net_config.json").is_file()
     assert (bundle / "fit_plan.json").is_file()
-    assert summary["best_val_masked_dice_loss"] >= 0.0
+    assert summary["best_selection_score"] >= 0.0
+    # Volume-selected runs never compute the masked-patch loss; the key
+    # stays in the summary, honest about being empty.
+    assert summary["best_val_masked_dice_loss"] is None
 
 
 def test_vanilla_fit_cli_smoke(tmp_path) -> None:

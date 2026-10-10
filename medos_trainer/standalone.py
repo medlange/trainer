@@ -356,11 +356,13 @@ def fit_command(
     """The whole autonomous pipeline: data -> fingerprint -> plan -> fit -> bundle.
 
     `resume_from` names a bundle directory with a `training_state.pt` (every
-    best checkpoint writes one): net, optimizer and scheduler are restored and
-    training starts at the recorded epoch + 1, with the checkpoint still
-    selected against the run-wide best — a resumed run can never regress the
-    artifact. THE GENERATOR IS NOT RESUMED (see `VanillaTrainer.fit`): only a
-    fresh-from-seed run replays exactly.
+    best checkpoint writes one): net, optimizer and scheduler are restored,
+    the run-wide best selection score comes back with them (from the top-K
+    index head when the bundle has one), and training starts at the recorded
+    epoch + 1, with the checkpoint still selected against the run-wide best —
+    a resumed run can never regress the artifact. THE GENERATOR IS NOT
+    RESUMED (see `VanillaTrainer.fit`): only a fresh-from-seed run replays
+    exactly.
 
     `max_val_cases` caps the post-fit evaluation (the val split it trains
     against; 8 by default, None for all of it). `augment_resample` overrides
@@ -438,12 +440,10 @@ def fit_command(
                              plan=fit_plan, device=device)
     resume = None
     if resume_from is not None:
-        state = trainer.load_state(resume_from)
-        record = json.loads(
-            (Path(resume_from) / "checkpoint.json").read_text(encoding="utf-8")
-        )
-        resume = {**state,
-                  "best_val_masked_dice_loss": float(record["val_masked_dice_loss"])}
+        # load_state restores the run-wide best selection score with the
+        # weights — from the top-K index head when the bundle has one, with
+        # checkpoint.json fallbacks that keep pre-top-K bundles resumable.
+        resume = trainer.load_state(resume_from)
     # UNDER DDP each rank draws its own patch stream: seed+rank. Single
     # process, get_rank() is 0 and the seed is exactly what it always was.
     result = trainer.fit(train, val, np.random.default_rng(seed + get_rank()),
@@ -460,7 +460,11 @@ def fit_command(
     )
     evaluation = _dice_rows(load_predictor(out_dir), val_raw,
                             max_cases=max_val_cases)
-    return {"best_val_masked_dice_loss": result["best_val_masked_dice_loss"],
+    return {"best_selection_score": result["best_selection_score"],
+            # The historical key: the min masked val loss for patch-selected
+            # runs, null for volume-selected ones (that plan never computes
+            # it — the selection score above is the number it optimizes).
+            "best_val_masked_dice_loss": result["best_val_masked_dice_loss"],
             "patch_size": list(plan.patch_size),
             "preset": plan.preset.name,
             "batch_size": plan.preset.batch_size,
@@ -517,7 +521,8 @@ def fit_cascade_command(
     result = trainer.fit(train, val, np.random.default_rng(seed + get_rank()),
                          out_dir=fine_dir)
     evaluation = evaluate_predictor(load_predictor(fine_dir), val)
-    summary = {"best_val_masked_dice_loss": result["best_val_masked_dice_loss"],
+    summary = {"best_selection_score": result["best_selection_score"],
+               "best_val_masked_dice_loss": result["best_val_masked_dice_loss"],
                "patch_size": list(plan.patch_size),
                "preset": plan.preset.name,
                "reasons": list(plan.reasons),
@@ -560,7 +565,8 @@ def crossval_command(
     fit's numpy generator comes from `default_rng(seed + fold)`. Each fold
     trains on the complement of its fold and validates on the fold itself,
     writes a full bundle at `out/fold-{k}/`, and evaluates that bundle on its
-    own fold. `report.json` aggregates the per-fold best validation scores
+    own fold. `report.json` aggregates the per-fold best selection scores
+    (volume foreground Dice for planned runs — see `VanillaTrainer.fit`)
     with the statistics module (mean and sample stdev).
 
     THE ENSEMBLE ROW: after the folds, every `fold-{k}/` bundle votes on the
@@ -619,11 +625,13 @@ def crossval_command(
         results.append({
             "fold": fold,
             "val_cases": [c.case_id for c in val],
+            "best_selection_score": result["best_selection_score"],
+            # Null for volume-selected folds (see fit_command's summary).
             "best_val_masked_dice_loss": result["best_val_masked_dice_loss"],
             "evaluation": evaluation,
         })
 
-    scores = [row["best_val_masked_dice_loss"] for row in results]
+    scores = [row["best_selection_score"] for row in results]
     report = {
         "folds": folds,
         "fold_assignment": fold_assignment,

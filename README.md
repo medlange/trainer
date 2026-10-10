@@ -174,6 +174,45 @@ plan:
   and a cascade.json recording the coarse bundle, the channel count and the
   fit summary land in the output directory.
 
+### Checkpoint selection: what "best" means, and how many survive
+
+Every epoch end scores the current net on the validation split and the
+checkpoint is kept for the best score — HIGHER is better in both modes
+(`selection_score` in `checkpoint.json` and the history; the patch mode
+stores the negated loss there):
+
+- **`patch_dice`** (hand-written `FitPlan`s): masked soft Dice **loss** on
+  random patches — the historical proxy. Byte-identical arithmetic, seconds
+  per epoch. Fine for tiny or fast runs where the proxy and the deployment
+  metric move together.
+- **`volume_dice`** (real plans, `PlannedRun.fit_plan()`): **full-volume
+  foreground Dice** on up to `selection_cases` validation cases, sliding
+  window over each whole volume, per-class Dice restricted to supervised
+  voxels — the evaluator's own definition, so the selector optimizes what
+  `vanilla-evaluate` reports. This exists because of the PulmoAI benchmark
+  (docs/benchmark-pulmo-2026-10-07.md, "Long-run continuation and the
+  checkpoint-selection lesson", 2026-10-10): a 250-epoch run kept improving
+  the patch proxy (0.3261 -> 0.3138 at epoch 121), yet the epoch-121 bundle
+  scored **0.438** fg Dice full-volume and had **overwritten** the
+  epoch-111 bundle's **0.539**. A proxy that can anti-correlate with the
+  deployment metric on the very next epoch must not be what selects. The
+  honesty: at real CT sizes, whole-volume inference on 4 cases is minutes
+  per epoch (toy volumes make it seconds — the test suite's shape).
+
+Because any selector can be wrong, the best model is never one overwriteable
+file. With `keep_checkpoints = K >= 2`, every epoch that improves the
+run-wide best also persists a **full inference bundle** under
+`checkpoints/epoch-<n>/`, and `checkpoints/index.json` ranks them
+(`[{epoch, score, dir}]`, best first); snapshots past K are **deleted from
+disk**, not just from the index — retention is a disk contract of about
+K times the model size. The single live bundle (`model.pt`,
+`checkpoint.json`, `training_state.pt` at the output root) always mirrors
+the index head, so `load_predictor(out_dir)` and `--resume-from` are
+unchanged; a resume restores the bar from the index head, so a resumed run
+can improve on the artifact but never regress it. `keep_checkpoints = 1`
+is the historical layout exactly: one live bundle, no `checkpoints/`
+directory.
+
 ### Preprocessing: what the plan decides about the pixels
 
 The fingerprint collects two more census numbers than the geometry, and
@@ -304,7 +343,8 @@ python trainer/examples/toy_pipeline.py
 | `medos_trainer/vanilla/preprocess.py` | resampling to the plan's target spacing, the foreground z-score, the `preprocess.json` record |
 | `medos_trainer/vanilla/nets.py` | the 3D UNet with deep supervision and its configuration |
 | `medos_trainer/vanilla/losses.py` | the masked segmentation loss |
-| `medos_trainer/vanilla/trainer.py` | the fit loop, AMP, checkpointing, the resume record, the bundle, the plateau/poly lr laws |
+| `medos_trainer/vanilla/trainer.py` | the fit loop, AMP, checkpointing, the top-K snapshot index, the resume record, the bundle, the plateau/poly lr laws |
+| `medos_trainer/vanilla/selection.py` | checkpoint selection by the deployment metric: full-volume validation foreground Dice (`volume_dice`) |
 | `medos_trainer/vanilla/distributed.py` | the DDP seam: `maybe_init_distributed`, rank helpers, the world-of-one-is-not-distributed rule |
 | `medos_trainer/vanilla/infer.py` | sliding-window inference, the bundle predictor, the fold ensemble (`EnsemblePredictor`) |
 | `medos_trainer/vanilla/cascade.py` | the coarse→fine hand-off: the coarse foreground probability as an extra image channel |

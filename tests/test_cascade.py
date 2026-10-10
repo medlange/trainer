@@ -87,7 +87,7 @@ def test_fine_cascade_fit_end_to_end_predicts_with_enlarged_channels(tmp_path) -
     assert document["coarse"] == str(coarse_dir)
     assert document["input_channels"] == 2
     assert document["fit"]["history"], "the fit summary carries the run"
-    assert summary["best_val_masked_dice_loss"] >= 0.0
+    assert summary["best_selection_score"] >= 0.0
 
     # THE FINE BUNDLE was rebuilt by load_predictor with the WIDER stem, and
     # it predicts on cascade-shaped input — that is the whole contract.

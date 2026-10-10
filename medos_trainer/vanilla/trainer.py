@@ -10,16 +10,26 @@ architecture family converges with), a fixed number of steps per epoch over
 foreground-biased patches, augmentation (mirror/rotate always; the
 scale/elastic resampling pair when the plan asks for it; the intensity trio
 — brightness/contrast/gamma — when the plan asks for that, always after the
-geometric tiers), validation each
-epoch as masked soft Dice LOSS (lower is better — the number is 1 − dice),
-a checkpoint kept for the LOWEST validation loss, and a learning-rate law
-the plan chooses: "plateau" steps ReduceLROnPlateau (mode="min", tracking
-the same loss) when validation stalls, while "poly" rewrites the lr EVERY
+geometric tiers), a per-epoch SELECTION SCORE the checkpoint is chosen by
+(the plan's `selection`: masked soft Dice on random patches — the historical
+proxy, "patch_dice" — or FULL-VOLUME foreground Dice on the validation
+split, the deployment metric, "volume_dice"; see vanilla/selection.py for
+why the benchmark replaced the proxy), a checkpoint kept for the BEST
+selection score (HIGHER is better in both modes — the patch mode stores the
+negated loss), and a learning-rate law
+the plan chooses: "plateau" steps ReduceLROnPlateau (tracking the same
+selection number: mode="min" on the patch loss, mode="max" on volume Dice)
+when validation stalls, while "poly" rewrites the lr EVERY
 TRAINING STEP as `learning_rate * (1 - progress)^0.9` over the run's
 progress — nnU-Net's PolyLRScheduler shape. Every best checkpoint is written
 beside its resume record (`training_state.pt` — net, optimizer, scheduler,
-epoch), so a run can continue from its best rather than from its end.
-Determinism is the caller's job (`torch.manual_seed`, existing
+epoch), so a run can continue from its best rather than from its end; and
+when the plan keeps more than one (`keep_checkpoints` >= 2), every improving
+epoch ALSO persists a full inference bundle under
+`out_dir/checkpoints/epoch-<n>/` with an `index.json` ranking them — a
+selector that can be wrong must never leave the best model as one
+overwriteable file (the PulmoAI benchmark lost a 0.539 bundle exactly that
+way). Determinism is the caller's job (`torch.manual_seed`, existing
 `environment.apply_determinism`); the loop receives a generator and uses it,
 and the resume record deliberately holds NO generator state: a resumed run
 continues the weights and the schedule, not the exact stream of patches —
@@ -32,6 +42,7 @@ a scaler, so the CPU path is the same arithmetic it always was.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +101,24 @@ class FitPlan:
     (documented in `fit`), so same-seed inline and prefetch runs see
     different patches — the same honesty nnU-Net's dataloader workers carry,
     and why prefetch off is the path tests and reproducibility claims use.
+    `selection` picks what the checkpoint is chosen by: "patch_dice" (the
+    default — masked soft Dice LOSS on random patches via `validate`,
+    byte-identical to every pre-existing plan and test; the record keeps the
+    loss under `val_masked_dice_loss` and the index/score under the negated
+    `selection_score`) or "volume_dice" — full-volume foreground Dice on the
+    validation split (vanilla/selection.py), the deployment metric, which
+    planned runs select by because the PulmoAI benchmark caught the patch
+    proxy anti-correlating with it (epoch 121's better proxy val scored 0.438
+    fg Dice and had overwritten epoch 111's 0.539 —
+    docs/benchmark-pulmo-2026-10-07.md). Volume selection costs minutes per
+    epoch at real CT sizes; the toy volumes tests use make it seconds.
+    `selection_cases` caps how many validation cases the volume selector
+    scores per epoch. `keep_checkpoints` is the top-K retention: 1 is the
+    historical layout exactly (the single live bundle, no `checkpoints/`
+    directory); K >= 2 additionally snapshots every improving epoch as a
+    full inference bundle under `out_dir/checkpoints/` and evicts the worst
+    beyond K — 0 is refused, because "keep none" would mean the best model
+    is nothing at all.
     """
 
     patch_size: tuple[int, int, int]
@@ -104,6 +133,9 @@ class FitPlan:
     use_amp: bool = False
     lr_schedule: str = "plateau"
     prefetch_batches: int = 0
+    selection: str = "patch_dice"
+    selection_cases: int = 4
+    keep_checkpoints: int = 3
 
     def __post_init__(self) -> None:
         if self.lr_schedule not in ("plateau", "poly"):
@@ -115,6 +147,22 @@ class FitPlan:
             raise ValueError(
                 f"prefetch_batches is a queue depth (0 = inline sampling), "
                 f"not a negative number: {self.prefetch_batches}"
+            )
+        if self.selection not in ("patch_dice", "volume_dice"):
+            raise ValueError(
+                f"selection must be one of ('patch_dice', 'volume_dice'), "
+                f"got {self.selection!r}"
+            )
+        if self.selection_cases < 1:
+            raise ValueError(
+                f"selection_cases is a positive count of validation cases, "
+                f"got {self.selection_cases}"
+            )
+        if self.keep_checkpoints < 1:
+            raise ValueError(
+                f"keep_checkpoints is the snapshot retention count "
+                f"(1 = the single best only, the historical layout); "
+                f"0 is refused: {self.keep_checkpoints}"
             )
 
 
@@ -192,10 +240,15 @@ class VanillaTrainer:
         # THE PLATEAU SCHEDULER EXISTS ONLY FOR THE PLATEAU LAW. "poly" is
         # stateless — the lr is a pure function of (epoch, step) — so there is
         # no scheduler object to own; `fit` rewrites the lr per step and the
-        # record below is the only place the law is written down.
+        # record below is the only place the law is written down. THE MODE
+        # FOLLOWS THE SELECTOR: the plateau law watches the same per-epoch
+        # number checkpoint selection compares — mode="min" on the patch-dice
+        # loss, mode="max" on volume Dice (higher is better there).
         self.scheduler = (
             torch.optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer, mode="min", factor=0.2, patience=2
+                self.optimizer,
+                mode="max" if plan.selection == "volume_dice" else "min",
+                factor=0.2, patience=2,
             )
             if plan.lr_schedule == "plateau"
             else None
@@ -255,9 +308,10 @@ class VanillaTrainer:
     @torch.no_grad()
     def validate(self, cases: list[Case], rng: np.random.Generator,
                  patches_per_case: int = 2) -> float:
-        """Masked soft Dice on random patches — the number the checkpoint is
-        selected by, and the number the plateau law watches when a plateau
-        plan runs (poly plans move by the clock, not by this)."""
+        """Masked soft Dice on random patches — the number the PATCH selector
+        ("patch_dice") selects the checkpoint by, and the number the plateau
+        law watches in that mode (poly plans move by the clock, not by this;
+        volume plans select on full-volume Dice, not on this loss)."""
         from medos_trainer.vanilla.losses import masked_soft_dice
 
         self.net.eval()
@@ -281,16 +335,51 @@ class VanillaTrainer:
                 )))
         return float(np.mean(scores)) if scores else 0.0
 
+    def volume_selection_score(self, val_cases: list[Case]) -> float:
+        """THE VOLUME SELECTOR'S SEAM: full-volume foreground Dice over up to
+        `plan.selection_cases` validation cases — the deployment metric
+        (vanilla/selection.py), HIGHER is better. Deliberately a method and
+        not an inline call: tests monkeypatch THIS to drive selection
+        deterministically, and the trainer's own docstring points here. Runs
+        the bare net under autocast when the fit uses AMP, exactly like
+        `validate`."""
+        from medos_trainer.vanilla.selection import volume_dice
+
+        net = self._bare_net()
+        if self.scaler is not None:
+            with torch.autocast("cuda"):
+                return volume_dice(
+                    net, val_cases, self.device, self.plan.selection_cases,
+                    patch_size=self.plan.patch_size,
+                )
+        return volume_dice(
+            net, val_cases, self.device, self.plan.selection_cases,
+            patch_size=self.plan.patch_size,
+        )
+
     def fit(self, train_cases: list[Case], val_cases: list[Case],
             rng: np.random.Generator, out_dir: str | Path | None = None,
             resume: dict | None = None) -> dict:
         """Train `plan.epochs` epochs; `resume` continues a saved best state.
 
-        `resume` is the dict `load_state` returns plus the fresh run's best
-        score under "best_val_masked_dice_loss" (the caller reads it from the
-        bundle's checkpoint.json): training starts at epoch `resume["epoch"]
-        + 1`, and the checkpoint is only overwritten when validation beats
-        the RUN-WIDE best, so a resumed run can never regress the artifact.
+        `resume` is the dict `load_state` returns: training starts at epoch
+        `resume["epoch"] + 1`, and the checkpoint is only overwritten when the
+        selection score beats the RUN-WIDE best (`resume["best_selection_score"]`,
+        restored from the bundle's top-K index head by `load_state`), so a
+        resumed run can never regress the artifact. Legacy resume dicts built
+        from a bundle's `checkpoint.json` alone — carrying only
+        `best_val_masked_dice_loss` — are still accepted; the loss is negated
+        into the score orientation.
+        SELECTION (plan.selection): "patch_dice" validates as the masked soft-
+        Dice loss on random patches (the historical proxy, byte-identical
+        arithmetic); "volume_dice" scores full-volume foreground Dice on up to
+        `plan.selection_cases` val cases — minutes per epoch at real CT sizes,
+        seconds on the toy volumes tests use (vanilla/selection.py documents
+        the trade). In both modes the record carries `selection_score`
+        (HIGHER is better; the patch mode negates the loss), and
+        `keep_checkpoints` >= 2 snapshots every improving epoch under
+        `out_dir/checkpoints/` with an `index.json` ranking — the best model
+        is never a single overwriteable file.
         THE GENERATOR IS NOT RESUMED — a fresh-from-seed run replays exactly;
         a resumed run continues the schedule with a new patch stream. That
         asymmetry is deliberate and documented rather than hidden.
@@ -320,10 +409,20 @@ class VanillaTrainer:
         inherits its rank-seeded `rng` exactly like the inline path does.
         """
         start_epoch = 0
-        best = float("inf")
+        # THE SELECTION BAR, run-wide: the best selection score so far,
+        # HIGHER is better in both selector modes. The patch mode's score is
+        # the negated validation loss (so `score > best` below selects exactly
+        # the epochs the historical `val < best` did); the volume mode's is
+        # foreground Dice.
+        best = float("-inf")
         if resume is not None:
             start_epoch = int(resume["epoch"]) + 1
-            best = float(resume["best_val_masked_dice_loss"])
+            if "best_selection_score" in resume:
+                best = float(resume["best_selection_score"])
+            else:
+                # LEGACY RESUME DICT (pre-top-K bundles): only the patch loss
+                # is on it; negate into the score orientation.
+                best = -float(resume["best_val_masked_dice_loss"])
         history: list[dict] = []
         prefetcher: BatchPrefetcher | None = None
         if self.plan.prefetch_batches > 0:
@@ -362,7 +461,7 @@ class VanillaTrainer:
                     ))
                     # THE POLY LAW MOVES EVERY STEP; the plateau law never touches
                     # the lr here — its step happens once per epoch, below, fed by
-                    # the validation loss it exists to watch.
+                    # the same selection number checkpoint selection compares.
                     if self.plan.lr_schedule == "poly":
                         self._set_poly_lr(epoch, step)
                 # RANK 0 OWNS VALIDATION, because every rank's net holds identical
@@ -373,15 +472,36 @@ class VanillaTrainer:
                 # plateau scheduler lives behind the same main-process guard it
                 # always lived behind (it was always fed by validation).
                 if is_main_process():
-                    val = self.validate(val_cases, rng)
-                    if self.scheduler is not None:
-                        self.scheduler.step(val)
-                    record = {"epoch": epoch, "loss": float(np.mean(losses)),
-                              "val_masked_dice_loss": val,
-                              "lr": self.optimizer.param_groups[0]["lr"]}
+                    if self.plan.selection == "volume_dice":
+                        # FULL-VOLUME FOREGROUND DICE — what deployment scores
+                        # (the benchmark lesson: the patch proxy anti-correlated
+                        # with this number and overwrote a better bundle).
+                        score = self.volume_selection_score(val_cases)
+                        if self.scheduler is not None:
+                            self.scheduler.step(score)
+                        record = {
+                            "epoch": epoch, "loss": float(np.mean(losses)),
+                            "selection_score": score, "volume_dice": score,
+                            "lr": self.optimizer.param_groups[0]["lr"],
+                        }
+                    else:
+                        # THE HISTORICAL PROXY, BYTE-IDENTICAL: masked soft-Dice
+                        # LOSS on random patches; the record keeps the loss and
+                        # carries the negated value as the selection score so one
+                        # comparison direction serves both selectors.
+                        val = self.validate(val_cases, rng)
+                        if self.scheduler is not None:
+                            self.scheduler.step(val)
+                        score = -val
+                        record = {
+                            "epoch": epoch, "loss": float(np.mean(losses)),
+                            "val_masked_dice_loss": val,
+                            "selection_score": score,
+                            "lr": self.optimizer.param_groups[0]["lr"],
+                        }
                     history.append(record)
-                    if val < best:
-                        best = val
+                    if score > best:
+                        best = score
                         if out_dir is not None:
                             self.save_checkpoint(out_dir, record)
                 if self.distributed:
@@ -412,7 +532,16 @@ class VanillaTrainer:
             # and its queued batches promptly in a long-lived process.
             if prefetcher is not None:
                 prefetcher.close()
-        return {"best_val_masked_dice_loss": best, "history": history}
+        return {
+            "best_selection_score": best,
+            # The historical key, kept for the patch selector only: the min
+            # masked val loss. Volume runs never compute it — None, not a
+            # made-up number.
+            "best_val_masked_dice_loss": (
+                -best if self.plan.selection == "patch_dice" else None
+            ),
+            "history": history,
+        }
 
     def save_checkpoint(self, out_dir: str | Path, record: dict) -> Path:
         from medos_trainer.vanilla.infer import save_inference_bundle
@@ -421,7 +550,47 @@ class VanillaTrainer:
             out_dir, self._bare_net(), record, patch_size=self.plan.patch_size
         )
         self.save_state(out_dir, epoch=int(record["epoch"]))
+        if self.plan.keep_checkpoints >= 2:
+            self._write_snapshot(out_dir, record)
         return Path(out_dir) / "model.pt"
+
+    def _write_snapshot(self, out_dir: str | Path, record: dict) -> None:
+        """TOP-K RETENTION, the benchmark's second lesson (docs/benchmark-
+        pulmo-2026-10-07.md): a selector that can be wrong must never leave
+        the best model as one overwriteable file. Every improving epoch
+        persists a FULL inference bundle under
+        `out_dir/checkpoints/epoch-<n>/` and rewrites the index —
+        [{epoch, score, dir}] sorted by `score` DESCENDING, where `score` is
+        the selection score (HIGHER is better in both modes; the patch mode
+        stores the negated loss). Snapshots past `keep_checkpoints` are
+        evicted from DISK, not just from the index: retention is a disk
+        contract, ~K times the model size.
+        """
+        from medos_trainer.vanilla.infer import save_inference_bundle
+
+        root = Path(out_dir) / "checkpoints"
+        epoch = int(record["epoch"])
+        snapshot_dir = root / f"epoch-{epoch}"
+        save_inference_bundle(
+            snapshot_dir, self._bare_net(), record, patch_size=self.plan.patch_size
+        )
+        index_path = root / "index.json"
+        entries: list[dict] = []
+        if index_path.is_file():
+            entries = json.loads(index_path.read_text(encoding="utf-8"))
+        entries = [e for e in entries if int(e["epoch"]) != epoch]
+        entries.append({
+            "epoch": epoch,
+            "score": float(record["selection_score"]),
+            "dir": snapshot_dir.name,
+        })
+        entries.sort(key=lambda e: e["score"], reverse=True)
+        for evicted in entries[self.plan.keep_checkpoints :]:
+            _remove_tree(root / evicted["dir"])
+        entries = entries[: self.plan.keep_checkpoints]
+        index_path.write_text(
+            json.dumps(entries, indent=2) + "\n", encoding="utf-8"
+        )
 
     def save_state(self, out_dir: str | Path, epoch: int) -> Path:
         """THE RESUME RECORD, written beside every best checkpoint.
@@ -453,8 +622,14 @@ class VanillaTrainer:
     def load_state(self, bundle_dir: str | Path) -> dict:
         """Inverse of `save_state`: restores net, optimizer and scheduler
         from a bundle's training_state.pt and returns the saved dict so the
-        caller can build `fit`'s `resume` argument (with the run-wide best
-        from the bundle's checkpoint.json). A None scheduler record is the
+        caller can build `fit`'s `resume` argument. The returned dict ALSO
+        carries `best_selection_score` — the run-wide best (higher is
+        better) restored from the top-K index head when the bundle has one;
+        else from `checkpoint.json` (new records carry `selection_score`;
+        legacy patch-only bundles carry `val_masked_dice_loss`, negated). A
+        directory holding `training_state.pt` but neither record (a bare
+        `save_state` target) gets -inf: the resumed run re-selects from its
+        first epoch. A None scheduler record is the
         poly plan's honest state: there is nothing to load, and the step
         counter the law reads is the epoch loop's own."""
         state = torch.load(
@@ -464,4 +639,34 @@ class VanillaTrainer:
         self.optimizer.load_state_dict(state["optimizer"])
         if state["scheduler"] is not None and self.scheduler is not None:
             self.scheduler.load_state_dict(state["scheduler"])
+        state["best_selection_score"] = self._read_best_selection_score(bundle_dir)
         return state
+
+    def _read_best_selection_score(self, bundle_dir: str | Path) -> float:
+        root = Path(bundle_dir)
+        index_path = root / "checkpoints" / "index.json"
+        if index_path.is_file():
+            entries = json.loads(index_path.read_text(encoding="utf-8"))
+            if entries:
+                return float(entries[0]["score"])
+        record_path = root / "checkpoint.json"
+        if record_path.is_file():
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            if "selection_score" in record:
+                return float(record["selection_score"])
+            return -float(record["val_masked_dice_loss"])
+        return float("-inf")
+
+
+def _remove_tree(path: Path) -> None:
+    """`shutil.rmtree`'s job in pathlib/os — the vanilla purity gate's
+    allowed import set has no shutil, and a snapshot directory holds files
+    only. Missing paths are fine: eviction must be idempotent."""
+    if not path.is_dir():
+        return
+    for child in path.iterdir():
+        if child.is_dir():
+            _remove_tree(child)
+        else:
+            child.unlink()
+    path.rmdir()

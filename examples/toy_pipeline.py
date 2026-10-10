@@ -69,7 +69,8 @@ def main() -> None:
                           # learning on this toy — the printed held-out dice
                           # is the example's point.
                           foreground_prob=1.0)
-    print("fit:", json.dumps(summary["best_val_masked_dice_loss"]), "best val masked dice")
+    print("fit:", json.dumps(summary["best_selection_score"]),
+          "best val volume foreground dice (the selector's number)")
 
     predictor = load_predictor(work / "bundle")
     case = load_case_npz(sorted(cases.glob("*.npz"))[-1])

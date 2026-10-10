@@ -55,7 +55,7 @@ def test_crossval_writes_bundles_report_and_covers_every_case(tmp_path) -> None:
         for b in range(a + 1, 3):
             assert not (per_fold[a] & per_fold[b]), "folds must not share a case"
 
-    scores = [row["best_val_masked_dice_loss"] for row in report["results"]]
+    scores = [row["best_selection_score"] for row in report["results"]]
     assert report["aggregate"]["mean"] == pytest.approx(statistics.mean(scores), abs=1e-9)
 
 

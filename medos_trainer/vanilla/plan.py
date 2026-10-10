@@ -197,6 +197,22 @@ class PlannedRun:
             # own shape). Hand-written FitPlans keep "plateau" — the defect
             # only bites at real budgets, and the tests pin its arithmetic.
             lr_schedule="poly",
+            # CHECKPOINT SELECTION BY THE DEPLOYMENT METRIC, NOT THE PROXY:
+            # the benchmark's 250-epoch run kept improving the masked-patch
+            # val proxy (0.3261 -> 0.3138 at epoch 121) while the bundle
+            # that proxy selected scored 0.438 fg Dice full-volume — and had
+            # OVERWRITTEN the epoch-111 bundle's 0.539 (docs/benchmark-
+            # pulmo-2026-10-07.md, "Long-run continuation", 2026-10-10). A
+            # proxy that can lie must not select, and the best model must
+            # never be one overwriteable file — so a real plan selects on
+            # full-volume val foreground Dice (scored on up to
+            # selection_cases cases per epoch) and retains the top
+            # keep_checkpoints snapshots under checkpoints/. Hand-written
+            # FitPlans keep "patch_dice" and keep_checkpoints=1/3 as they
+            # always were — byte-exact, the tests' reproducible path.
+            selection="volume_dice",
+            selection_cases=4,
+            keep_checkpoints=3,
         )
 
     @property
