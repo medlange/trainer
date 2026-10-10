@@ -225,6 +225,55 @@ full-volume-val checkpoint selection, top-K retention, elastic-augmented
 rerun (the torch-native elastic is 85x faster but never re-benchmarked),
 batch size, and a quiet-box 1000-epoch run.
 
+
+### Full-stack runs and the second proxy falsification (2026-10-10, final)
+
+The full-stack run (poly + intensity + torch-elastic + texture + AMP +
+volume-selection, 188 epochs before the environment stalled it; thread-cap
+fix `0a8fb04` landed mid-campaign) produced the campaign's most
+instructive result. Its top-K index ranked epoch 188 (0.5419) > 172
+(0.5096) > 115 (0.4811); the deployment evaluator on raw cases ranked
+them 0.409 / 0.429 / 0.431 — INVERTED. Even full-volume Dice, when scored
+on the already-resampled training grid, measures grid-overfit: later
+epochs fit the training resampling better while raw-grid generalization
+degraded. Both historical proxies (patch-level loss, volume Dice on the
+training grid) are now falsified; `deployment_dice` (selection.py) is the
+only non-lying selector — it replays vanilla-evaluate's exact path and
+aggregation, bit-equal by test.
+
+THE STALL, ROOT-CAUSED (two independent defects, both fixed):
+1. scipy elastic at ~35 s/patch — masqueraded as a hang; torch-native
+   rewrite, ~85x faster (8ef50f8).
+2. The remaining "stall": faulthandler dumps showed the producer thread
+   and training thread fighting over torch's PROCESS-GLOBAL intra-op pool
+   (default: all cores) with OpenMP active-wait spinning every core —
+   ops crawl, nothing advances. Fixed by capping intra-op threads at 8
+   (0a8fb04). nnU-Net never sees this because its augmenters live in
+   worker processes.
+
+CAMPAIGN TABLE, final (crop corpus, identical split and evaluator):
+
+| run | stack | best real fg Dice |
+|---|---|---|
+| nnU-Net 250 ep | reference | 0.849 |
+| Medlange ~110 ep | poly+intensity, no elastic/texture | 0.539 |
+| Medlange 80 ep | poly+intensity | 0.482 |
+| Medlange 115-188 ep | FULL stack (elastic+texture) | 0.41-0.43 |
+
+VERDICT. The preprocessing-parity goal (W16) is met and exceeded as
+engineering; the benchmark criterion (comparable to nnU-Net's 0.764-0.849
+at matched budget) is NOT met: the best honest number is 0.539 vs
+nnU-Net's 0.756-0.78 at 20-50 epochs. The gap did not close with the
+heavy-augmentation stack on this 16-case corpus at these budgets — the
+remaining levers, in honest order: (1) the full-stack run never completed
+with the deployment selector (needs a quiet night + the thread-cap fix,
+which landed only at epoch 188 of the last attempt); (2) n=4 val cases
+makes ±0.1 differences noise — multi-seed evaluation is required before
+any further single-number claims; (3) capacity (6-level net) and 1000-ep
+budgets remain untried. What this campaign produced beyond the numbers:
+a framework that learns real low-contrast CT end-to-end at nnU-Net-class
+throughput, with every subsystem it lost to documented and fixed.
+
 ## W18 (open)
 
 1. THE EPOCH-STALL PATHOLOGY: periodically an epoch goes from ~75 s to 20+
