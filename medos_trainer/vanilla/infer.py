@@ -26,6 +26,7 @@ import json
 from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -37,6 +38,9 @@ from medos_trainer.vanilla.preprocess import (
     resample,
     spacing_matches,
 )
+
+if TYPE_CHECKING:
+    from medos_trainer.vanilla.trainer import FitPlan
 
 
 @lru_cache(maxsize=8)
@@ -333,6 +337,7 @@ def save_inference_bundle(
     record: dict,
     patch_size: tuple[int, int, int] | None = None,
     preprocessing: Preprocessing | None = None,
+    plan: FitPlan | None = None,
 ) -> None:
     """Everything inference needs, beside the checkpoint record itself.
 
@@ -347,7 +352,18 @@ def save_inference_bundle(
     before preprocessing existed carry no `preprocess.json`; `load_predictor`
     reads a missing file as "identity", and they keep predicting as they
     always did.
+
+    WHEN THE CALLER PASSES THE FitPlan (the trainer does, on every best
+    checkpoint and top-K snapshot), `fit_plan.json` ALSO carries the full
+    plan asdict — the augmentation policy, lr law, selection mode. Inference
+    ignores those keys (it reads `patch_size` alone); they exist because the
+    W21 deadlock showed a bundle that cannot say how it was trained is a
+    bundle that cannot be debugged. THE DESIGN NARROWED ONCE, AND THE
+    INCIDENT OVERTURNED IT: "patch size only" presumed training dynamics
+    never needed auditing at the artifact; they do.
     """
+    from medos_trainer.vanilla.trainer import FitPlan
+
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     torch.save(net.state_dict(), out / "model.pt")
@@ -355,8 +371,12 @@ def save_inference_bundle(
         json.dumps(asdict(net.config), indent=2), encoding="utf-8"
     )
     if patch_size is not None:
+        fit_plan_document: dict = {"patch_size": list(patch_size)}
+        if plan is not None:
+            assert isinstance(plan, FitPlan)
+            fit_plan_document.update(asdict(plan))
         (out / "fit_plan.json").write_text(
-            json.dumps({"patch_size": list(patch_size)}, indent=2),
+            json.dumps(fit_plan_document, indent=2),
             encoding="utf-8",
         )
     if preprocessing is not None:

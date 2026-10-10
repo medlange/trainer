@@ -301,10 +301,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vanilla_fit.add_argument(
         "--augment-resample", action="store_true",
-        help="OPT IN to scale/elastic augmentation. NOT a plan default: the "
-             "PulmoAI campaign caught it stalling every run that enabled it "
-             "(multi-hour CPU stall, GPU idle) — see the benchmark report, "
-             "W18. Use only on a machine you can watch.",
+        help="force scale/elastic augmentation ON. It is already a real plan's "
+             "default since the W19 torch-native rewrite (~0.4 s/patch, see the "
+             "benchmark report); this flag only re-affirms the plan.",
+    )
+    vanilla_fit.add_argument(
+        "--no-augment-texture", action="store_true",
+        help="disable the plan's texture augmentation (gaussian noise / blur / "
+             "low-resolution simulation). The W21 benchmark rerun keeps the "
+             "tier off: a prefetch-thread gaussian-blur conv3d deadlocked "
+             "against AMP's CUDA sync on the benchmark box (GPU idle, two "
+             "identical faulthandler dumps 10 min apart). Off until that "
+             "race is root-caused.",
+    )
+    vanilla_fit.add_argument(
+        "--augment-texture", action="store_true",
+        help="force texture augmentation ON (a real plan's default). See "
+             "--no-augment-texture for why the opt-out exists.",
     )
     vanilla_fit.add_argument(
         "--amp", action="store_true",
@@ -341,6 +354,24 @@ def build_parser() -> argparse.ArgumentParser:
     vanilla_crossval.add_argument(
         "--foreground-prob", type=float, default=None,
         help="override the sampler's foreground bias in [0, 1] (plan default 1/3)",
+    )
+    vanilla_crossval.add_argument(
+        "--no-augment-resample", action="store_true",
+        help="disable the plan's scale/elastic augmentation in every fold",
+    )
+    vanilla_crossval.add_argument(
+        "--augment-resample", action="store_true",
+        help="force scale/elastic augmentation ON in every fold (already a "
+             "real plan's default since W19)",
+    )
+    vanilla_crossval.add_argument(
+        "--no-augment-texture", action="store_true",
+        help="disable the plan's texture augmentation in every fold (see "
+             "vanilla-fit's --no-augment-texture: a W21 deadlock)",
+    )
+    vanilla_crossval.add_argument(
+        "--augment-texture", action="store_true",
+        help="force texture augmentation ON in every fold (a real plan's default)",
     )
 
     vanilla_evaluate = sub.add_parser(
@@ -444,6 +475,8 @@ def main(argv: list[str] | None = None) -> int:
             use_amp=args.amp,
             augment_resample=(True if args.augment_resample
                               else False if args.no_augment_resample else None),
+            augment_texture=(True if args.augment_texture
+                             else False if args.no_augment_texture else None),
             foreground_prob=args.foreground_prob, batch_size=args.batch_size,
             lr_schedule=args.lr_schedule,
             cascade_from=args.cascade_from,
@@ -458,6 +491,10 @@ def main(argv: list[str] | None = None) -> int:
             folds=args.folds, epochs=args.epochs,
             steps_per_epoch=args.steps_per_epoch, seed=args.seed, device=args.device,
             max_val_cases=args.max_val_cases, foreground_prob=args.foreground_prob,
+            augment_resample=(True if args.augment_resample
+                              else False if args.no_augment_resample else None),
+            augment_texture=(True if args.augment_texture
+                             else False if args.no_augment_texture else None),
         )
         print(json.dumps(report["aggregate"], indent=2))
         print(f"wrote {Path(args.out) / 'report.json'}")

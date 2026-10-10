@@ -596,7 +596,8 @@ class VanillaTrainer:
         from medos_trainer.vanilla.infer import save_inference_bundle
 
         save_inference_bundle(
-            out_dir, self._bare_net(), record, patch_size=self.plan.patch_size
+            out_dir, self._bare_net(), record, patch_size=self.plan.patch_size,
+            plan=self.plan,
         )
         self.save_state(out_dir, epoch=int(record["epoch"]))
         if self.plan.keep_checkpoints >= 2:
@@ -621,7 +622,8 @@ class VanillaTrainer:
         epoch = int(record["epoch"])
         snapshot_dir = root / f"epoch-{epoch}"
         save_inference_bundle(
-            snapshot_dir, self._bare_net(), record, patch_size=self.plan.patch_size
+            snapshot_dir, self._bare_net(), record, patch_size=self.plan.patch_size,
+            plan=self.plan,
         )
         index_path = root / "index.json"
         entries: list[dict] = []

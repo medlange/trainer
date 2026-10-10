@@ -348,6 +348,7 @@ def fit_command(
     max_val_cases: int = 8,
     use_amp: bool = False,
     augment_resample: bool | None = None,
+    augment_texture: bool | None = None,
     foreground_prob: float | None = None,
     batch_size: int | None = None,
     lr_schedule: str | None = None,
@@ -365,12 +366,14 @@ def fit_command(
     exactly.
 
     `max_val_cases` caps the post-fit evaluation (the val split it trains
-    against; 8 by default, None for all of it). `augment_resample` overrides
-    the plan's default (on for real plans); `use_amp` enables autocast+scaler
-    on CUDA devices. `foreground_prob` overrides the sampler's foreground
-    bias — on a tiny corpus where background patches would let the net
+    against; 8 by default, None for all of it). `use_amp` enables
+    autocast+scaler on CUDA devices. `foreground_prob` overrides the sampler's
+    foreground bias — on a tiny corpus where background patches would let the net
     converge to "all background", pushing it toward 1.0 is the honest knob
-    (every patch then carries the structure being taught).
+    (every patch then carries the structure being taught). `augment_resample`
+    and `augment_texture` override the plan's defaults (both on for real
+    plans; the texture opt-out exists because of the W21 prefetch/deadlock —
+    see the CLI help).
 
     `cascade_from` SWITCHES THE COMMAND TO CASCADE MODE: the coarse bundle at
     that path predicts every case, its foreground probability becomes an
@@ -423,12 +426,16 @@ def fit_command(
     val = preprocess_cases(cases[:split], preprocessing)
     val_raw = cases[:split]
     fit_plan = plan.fit_plan()
-    if augment_resample is not None or use_amp or lr_schedule is not None:
+    if (augment_resample is not None or use_amp or lr_schedule is not None
+            or augment_texture is not None):
         fit_plan = replace(
             fit_plan,
             augment_resample=fit_plan.augment_resample
             if augment_resample is None
             else augment_resample,
+            augment_texture=fit_plan.augment_texture
+            if augment_texture is None
+            else augment_texture,
             use_amp=use_amp,
             lr_schedule=fit_plan.lr_schedule
             if lr_schedule is None
@@ -557,6 +564,8 @@ def crossval_command(
     device: str = "cpu",
     max_val_cases: int | None = None,
     foreground_prob: float | None = None,
+    augment_resample: bool | None = None,
+    augment_texture: bool | None = None,
 ) -> dict:
     """K-fold cross-validation over a cases directory, ONE report.
 
@@ -601,6 +610,16 @@ def crossval_command(
         )
     plan = _planned_run(cases, preset, epochs, steps_per_epoch, foreground_prob)
     fit_plan = plan.fit_plan()
+    if augment_resample is not None or augment_texture is not None:
+        fit_plan = replace(
+            fit_plan,
+            augment_resample=fit_plan.augment_resample
+            if augment_resample is None
+            else augment_resample,
+            augment_texture=fit_plan.augment_texture
+            if augment_texture is None
+            else augment_texture,
+        )
 
     permutation = np.random.default_rng(seed).permutation(len(cases))
     fold_assignment = {

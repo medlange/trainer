@@ -274,22 +274,96 @@ budgets remain untried. What this campaign produced beyond the numbers:
 a framework that learns real low-contrast CT end-to-end at nnU-Net-class
 throughput, with every subsystem it lost to documented and fixed.
 
-## W18 (open)
+## W21 (2026-10-11): the full-parity deadlock, the missing opt-out, and
+## what case_0009 actually is
 
-1. THE EPOCH-STALL PATHOLOGY: periodically an epoch goes from ~75 s to 20+
-   minutes at 100%+ CPU with no checkpoint progress (seen on both the local
-   box and the shared lab, always mid-run). No py-spy/strace access on the
-   shared box to catch it in the act. Suspects to check first on an owned
-   machine: (a) python GC gen-2 scanning the prefetch queue's ~1 GB of
-   stacked batches; (b) a torch CPU-tensor allocation stall next to tenant
-   memory pressure; (c) a prefetch-thread/main-thread GIL convoy. Reproduce
-   with `PYTHONMALLOC=debug`, `gc.set_debug`, and `faulthandler.dump_traceback_later`
-   armed from fit start.
-2. Sample-efficiency: at ~equal wall-clock Medlange converges to ~0.46 vs
-   nnU-Net's ~0.78 on crops. Next levers, in order: intensity augmentations
-   (nnU-Net's gamma/contrast/brightness — they regularize AND effectively
-   extend the dataset; ours has none), batch size (ours 2, theirs 2-12 via
-   plans), and 1000-epoch confirmation runs on a quiet machine.
+The 23:46 relaunch ran the designed W19/W20 default — full nnU-Net-parity
+augmentation (geometric + intensity + texture), 250 epochs, deployment
+selection, all three stall fixes in. Seed 0 trained healthy to epoch 18.
+Seed 1 DEADLOCKED at ~epoch 12, and the evidence is unambiguous:
+
+- faulthandler dumps 10 minutes apart (00:16, 00:26) are byte-identical:
+  main thread inside AMP `GradScaler._maybe_opt_step` — the `found_inf`
+  `.item()` CUDA synchronisation; GPU utilisation 0%; the prefetch
+  producer thread inside `augment_texture`'s `_gaussian_blur3d` conv3d.
+- No checkpoint progress for 18 minutes. Killed both runs at 00:35 —
+  seed 0's health proves the deadlock is a race, not a deterministic
+  defect, so a restarted seed 1 could hang at any epoch.
+
+WHAT THE INCIDENT EXPOSED BEYOND ITSELF. Two framework defects, both
+fixed in the same cycle (252 trainer tests green):
+
+1. The texture tier shipped with NO CLI control: presets default it ON
+   (a deliberate W20 decision), so the campaign's best-known arm —
+   poly + intensity, no elastic/texture — was inexpressible from the
+   command line. Added `--augment-texture` / `--no-augment-texture` to
+   `vanilla-fit` and `vanilla-crossval`, wired through
+   `fit_command`/`crossval_command`; corrected `--augment-resample`'s
+   help, which still described the W18 scipy stall as current truth.
+2. A bundle could not say how it was trained: `fit_plan.json` carried
+   `patch_size` only — pinned by a test as "by design (inference does
+   not need the training batch)". A bundle that cannot name its
+   augmentation policy cannot be debugged when that policy is the
+   suspect (this incident). `fit_plan.json` now carries the full
+   FitPlan asdict as provenance; inference still reads `patch_size`
+   alone, and the pinned comment records the overturned design.
+
+CASE_0009, DIAGNOSED. The val case every Medlange run scores 0.000 on
+(nnU-Net: 0.58-0.59) is not model blindness. CPU predict with the best
+honest bundle (ml-poly80) gives **fg_prob_max = 0.466** — the model
+sees the lesion — but no voxel crosses argmax (pred_fg = 0), and at
+th=0.1 only 9.7k voxels (dice 0.04). The failure mode is
+UNDERCONFIDENCE on the smallest val lesion (55.5k vox, 0.29%), not a
+pipeline break: the case's spacing/intensity/shape are unremarkable
+(the corpus is already 1 mm, so W16 resampling is identity here), and
+the loss already includes masked per-voxel CE, which excludes the
+"missing per-voxel term" hypothesis. Leading remaining hypothesis vs
+nnU-Net: spatial augmentation (elastic/scale), which nnU-Net trains
+with and the intensity-only arm does without — historically exactly
+the tier that buys small-structure robustness. Testable as a clean
+ablation once the deadlock is root-caused.
+
+RELAUNCHED 00:49/00:50: intensity-only (mirror/rotate + intensity,
+`--no-augment-resample --no-augment-texture`), seeds 0 and 1, 250
+epochs, deployment selection, AMP. Expected finish ~13:00-15:00;
+mean±std of the two seeds against nnU-Net 0.849 (250 ep) /
+0.756-0.782 (50 ep) is the number this campaign reports next.
+
+OPEN DEFECT: the prefetch-producer CPU-conv vs AMP-CUDA-sync deadlock.
+Until it is root-caused, the full-parity configuration is not safe for
+unattended runs; the texture tier stays default-ON in plans (the W20
+design stands) with the documented opt-out.
+
+## W18 (stalls root-caused 2026-10-10; one new stall mode 2026-10-11 — see W21)
+
+0. STATUS OF THE TWO ITEMS BELOW: item 1's epoch-stall pathology was
+   root-caused and fixed — three independent causes, in the order they
+   were caught: scipy elastic evaluation at ~35 s/patch (W18→W19 torch
+   rewrite); an OMP convoy in the process-global CPU thread pool (W20
+   thread cap); scipy `zoom` inside the volume-selection scorer (W20
+   torch resample). faulthandler dumps armed from fit start are what
+   caught the third. A FOURTH stall mode surfaced 2026-10-11 — the
+   prefetch/AMP deadlock documented in W21 — and is open.
+
+1. THE EPOCH-STALL PATHOLOGY (FIXED 2026-10-10 — kept for the method):
+   periodically an epoch went from ~75 s to 20+ minutes at 100%+ CPU with
+   no checkpoint progress (seen on both the local box and the shared lab,
+   always mid-run). No py-spy/strace access on the shared box to catch it
+   in the act — what caught it was `faulthandler.dump_traceback_later`
+   armed from fit start, exactly the repro aid this item prescribed. The
+   three actual root causes, in catch order: scipy elastic spline
+   evaluation at ~35 s/patch (→ W19 torch-native rewrite); an OMP convoy
+   in the process-global CPU thread pool (→ W20 thread cap); scipy `zoom`
+   inside the volume-selection scorer (→ W20 torch resample). The
+   GC/tenant-pressure/GIL suspects above were investigated and were not
+   it. A fourth mode — the W21 prefetch/AMP deadlock — is open.
+2. Sample-efficiency (PARTIALLY ADDRESSED — intensity tier shipped W20,
+   residual encoder + DS weights W17, thread cap + prefetch W20): at
+   ~equal wall-clock Medlange converges to ~0.46-0.54 vs nnU-Net's ~0.78
+   on crops. Remaining levers, in order: multi-seed evaluation (running,
+   W21), the spatial tier once its deadlock is root-caused, batch size
+   (ours 2, theirs 2-12 via plans), and 1000-epoch confirmation runs on
+   a quiet machine.
 
 
 Fingerprint foreground-intensity statistics + dataset z-score normalisation;

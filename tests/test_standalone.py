@@ -77,6 +77,37 @@ def test_vanilla_fit_cli_smoke(tmp_path) -> None:
     assert (bundle / "model.pt").is_file()
 
 
+def test_vanilla_fit_cli_augment_texture_opt_out(tmp_path) -> None:
+    """The W21 flag must reach the plan the fit actually runs.
+
+    THE BUG IT EXISTED TO FIX: texture augmentation shipped with no CLI
+    control, so a rerun of the known-best intensity-only campaign arm could
+    not be expressed from the command line — and the full-parity default
+    deadlocked on the benchmark box (prefetch-thread gaussian blur against
+    AMP's CUDA sync). The bundle's fit_plan.json is the fit's own record of
+    what it ran; that is what the assertion reads.
+    """
+    cases = _write_cases(tmp_path)
+    default_bundle = tmp_path / "default"
+    assert main(["vanilla-fit", "--data", str(cases), "--preset", "cpu",
+                 "--out", str(default_bundle), "--epochs", "1",
+                 "--steps-per-epoch", "1"]) == 0
+    off_bundle = tmp_path / "off"
+    assert main(["vanilla-fit", "--data", str(cases), "--preset", "cpu",
+                 "--out", str(off_bundle), "--epochs", "1",
+                 "--steps-per-epoch", "1", "--no-augment-texture"]) == 0
+    on_bundle = tmp_path / "on"
+    assert main(["vanilla-fit", "--data", str(cases), "--preset", "cpu",
+                 "--out", str(on_bundle), "--epochs", "1",
+                 "--steps-per-epoch", "1", "--augment-texture"]) == 0
+    def read(b):
+        return json.loads((b / "fit_plan.json").read_text(
+            encoding="utf-8"))["augment_texture"]
+    assert read(default_bundle) is True, "a real plan keeps texture ON"
+    assert read(off_bundle) is False, "--no-augment-texture did not reach the fit"
+    assert read(on_bundle) is True
+
+
 def test_vanilla_plan_cli_smoke(tmp_path) -> None:
     cases = _write_cases(tmp_path)
     out = tmp_path / "plan.json"
@@ -129,8 +160,10 @@ def test_fit_command_batch_size_override(tmp_path) -> None:
     summary = fit_command(cases, "cpu", summary_bundle, epochs=1, steps_per_epoch=1,
                           batch_size=1)
     assert (summary_bundle / "model.pt").is_file()
-    # the override is recorded in the run summary — fit_plan.json carries the
-    # patch size only, by design (inference does not need the training batch)
+    # the override is recorded in the run summary AND the bundle: fit_plan.json
+    # carries the patch size for inference plus the full plan asdict as
+    # provenance (W21: a bundle that cannot say how it was trained cannot be
+    # debugged — the augmentation policy rides the artifact now)
     assert summary["batch_size"] == 1
     assert summary["preset"] == "cpu"
 
