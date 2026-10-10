@@ -520,49 +520,29 @@ def augment_texture(
 
 
 def _gaussian_blur3d(image: np.ndarray, sigma: float) -> np.ndarray:
-    """3D separable Gaussian blur: three depthwise 1D conv3d passes.
+    """3D separable Gaussian blur, one channel at a time, via
+    `scipy.ndimage.gaussian_filter`.
 
-    Kernel size 2*ceil(2.5*sigma)+1 — 2.5 sigmas of support each side, the
-    same truncation nnU-Net's GaussianBlurTransform uses. Each pass
-    unsqueezes the (C,K,J,I) array into (1,C,K,J,I) and convolves along one
-    spatial axis with a (C,1,1,1,W)/(C,1,1,W,1)/(C,1,W,1,1) weight at
-    groups=C. Borders are REFLECTION-padded (F.pad + conv at zero padding),
-    matching scipy's gaussian_filter default: a zero pad would fade the
-    patch border toward 0 and invent an edge the blur is supposed to remove.
-    """
-    import torch
-    import torch.nn.functional as F
-
-    radius = int(np.ceil(2.5 * sigma))
-    coords = np.arange(2 * radius + 1, dtype=np.float32) - radius
-    kernel = np.exp(-(coords * coords) / (2.0 * sigma * sigma))
-    kernel /= kernel.sum()
-    base = torch.from_numpy(kernel)
-
-    t = torch.from_numpy(np.ascontiguousarray(image)).unsqueeze(0)
-    channels = image.shape[0]
-    for axis in (2, 3, 4):  # K, J, I in the (1,C,K,J,I) view
-        # reflect-pad needs pad < axis length; a kernel wider than the patch
-        # (huge sigma on a tiny patch) crops to the axis and renormalizes.
-        limit = t.shape[axis] - 1
-        keep = min(radius, limit)
-        if keep < radius:
-            centre = len(kernel) // 2
-            k = base[centre - keep:centre + keep + 1]
-            k = k / k.sum()
-        else:
-            k = base
-        pads = [0, 0, 0, 0, 0, 0]
-        pads[(4 - axis) * 2] = keep        # left end of the F.pad 6-tuple
-        pads[(4 - axis) * 2 + 1] = keep    # right end
-        t = F.pad(t, pads, mode="reflect")
-        shape = [1, 1, 1, 1, 1]
-        shape[axis] = 2 * keep + 1
-        weight = k.reshape(shape).expand(
-            channels, shape[1], shape[2], shape[3], shape[4]
-        ).contiguous()
-        t = F.conv3d(t, weight, groups=channels)
-    return t.squeeze(0).numpy()
+    WHY SCIPY AND NOT THE OBVIOUS TORCH conv3d: the blur runs on the
+    prefetch PRODUCER thread, and the W21 deadlock put this exact op at the
+    scene — main thread parked in AMP's `found_inf` `.item()` CUDA sync, GPU
+    at 0%, producer inside `F.conv3d`'s oneDNN grouped convolution,
+    byte-identical faulthandler stacks 10 minutes apart (docs/benchmark-
+    pulmo-2026-10-07.md, W21). scipy's separable correlate runs entirely
+    outside torch's process-global OMP thread pool, so it cannot interlock
+    with the CUDA-side wait. This function used to BE the torch conv3d blur
+    whose docstring said it MATCHED scipy's gaussian_filter default — going
+    to the reference itself is simpler and removes the suspect op. The
+    texture tests pin behaviour (HF-energy reduction, identity at neutral),
+    not the implementation. Truncation is scipy's default (4.0 sigmas of
+    support), slightly wider than the old 2.5-sigma cut — within what the
+    tier promises."""
+    blurred = np.empty_like(image)
+    for channel in range(image.shape[0]):
+        blurred[channel] = scipy.ndimage.gaussian_filter(
+            image[channel], sigma=sigma, mode="reflect"
+        )
+    return blurred
 
 
 def _crop_or_reflect_pad(arr: np.ndarray, target: tuple[int, int, int]) -> np.ndarray:

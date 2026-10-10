@@ -330,9 +330,15 @@ mean±std of the two seeds against nnU-Net 0.849 (250 ep) /
 0.756-0.782 (50 ep) is the number this campaign reports next.
 
 OPEN DEFECT: the prefetch-producer CPU-conv vs AMP-CUDA-sync deadlock.
-Until it is root-caused, the full-parity configuration is not safe for
-unattended runs; the texture tier stays default-ON in plans (the W20
-design stands) with the documented opt-out.
+MITIGATION SHIPPED SAME DAY (W21b): `_gaussian_blur3d` no longer runs a
+torch grouped conv3d on the producer thread — it calls the reference it
+always claimed to match, `scipy.ndimage.gaussian_filter`, which executes
+outside torch's process-global OMP pool and so cannot interlock with the
+CUDA-side wait. THE ROOT CAUSE IS STILL NOT PROVEN: the stack evidence put
+the producer inside that conv, but one sample of a race is a suspect, not a
+verdict. Until a reproduction on an owned machine confirms the mechanism,
+treat the full-parity configuration as mitigated-but-unproven; the opt-out
+stays, and the texture tier keeps its plan default ON.
 
 ## W18 (stalls root-caused 2026-10-10; one new stall mode 2026-10-11 — see W21)
 
