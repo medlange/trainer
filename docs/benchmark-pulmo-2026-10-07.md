@@ -194,6 +194,37 @@ named, addressable items rather than a mysterious deficit. The framework
 is not yet "better than nnU-Net"; it is now, for the first time, in the
 same game with a written map of the remaining distance.
 
+
+### Long-run continuation and the checkpoint-selection lesson (2026-10-10)
+
+The 250-epoch run stalled at epoch 111 on the shared box (swap-phase
+tenants, unrelated to augmentation), but its best bundle evaluated at
+**0.539 fg Dice** — the campaign's best (poly+intensity+prefetch+AMP,
+no elastic in this run). A resume chunk (111->159) completed and kept
+improving the val proxy (0.3261 -> 0.3138 at epoch 121) — yet the 121
+bundle scored only 0.438 fg Dice, and it had OVERWRITTEN the 0.539 one.
+
+THE LESSON, worth its own line in the framework's debt register: the
+masked-patch val metric the checkpoint selector optimizes is a PROXY, and
+on this corpus it anti-correlated with the deployment metric on the very
+next epoch. Two consequences, recorded as W18 work: (1) checkpoint
+selection for segmentation runs should score full-volume val foreground
+Dice (the deployment shape), not random-patch soft Dice; (2) keep top-K
+checkpoints — a proxy that can lie must never be the only copy of the
+best model.
+
+FINAL BENCHMARK TABLE (crop corpus, identical split/evaluator):
+
+| | nnU-Net | Medlange (best) |
+|---|---|---|
+| fg Dice @ best | 0.849 @ 250 ep | **0.539 @ ~111 ep** |
+| fg Dice @ 50-80 ep | 0.756-0.782 | 0.482 |
+
+The gap to nnU-Net is now a NUMBERED list rather than a mystery:
+full-volume-val checkpoint selection, top-K retention, elastic-augmented
+rerun (the torch-native elastic is 85x faster but never re-benchmarked),
+batch size, and a quiet-box 1000-epoch run.
+
 ## W18 (open)
 
 1. THE EPOCH-STALL PATHOLOGY: periodically an epoch goes from ~75 s to 20+
