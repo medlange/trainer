@@ -184,6 +184,13 @@ class PlannedRun:
             # thread, never implicated in the stall, and the benchmark named
             # it a gap (nnU-Net augments intensity, we only did geometry).
             augment_intensity=True,
+            # and the TEXTURE tier (gaussian noise / blur / low-resolution
+            # simulation) with it — the benchmark named these the missing
+            # last three of nnU-Net's ~10-transform family, and with them on,
+            # a real plan runs the full nnU-Net-parity set: geometric,
+            # intensity, texture. Torch-native like the geometric tiers, so
+            # the producer thread absorbs its cost.
+            augment_texture=True,
             # and a real plan PREFETCHES: the producer thread overlaps patch
             # sampling/augmentation with the GPU step (see prefetch.py) —
             # the benchmark measured ~0.3-0.5 s/step of CPU work the GPU

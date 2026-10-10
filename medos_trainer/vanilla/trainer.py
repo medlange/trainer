@@ -55,6 +55,7 @@ from medos_trainer.vanilla.data import (
     augment_intensity,
     augment_mirror_rotate,
     augment_scale_elastic,
+    augment_texture,
     make_batch,
 )
 from medos_trainer.vanilla.distributed import (
@@ -80,6 +81,13 @@ class FitPlan:
     image-only and runs AFTER the geometric tiers in both the inline loop
     and the prefetch producer, and the two sites must stay in the same order
     (see `_batch_factory`).
+    `augment_texture` switches the texture trio — gaussian noise, gaussian
+    blur, low-resolution simulation (data.augment_texture) — the last
+    nnU-Net-parity tier, completing the family with geometric + intensity:
+    same default logic (off for hand-written plans, on for planned runs),
+    same image-only contract, and it runs AFTER intensity in both the inline
+    loop and the prefetch producer; the two sites must stay in the same
+    order (see `_batch_factory`).
     `use_amp` enables autocast+GradScaler on CUDA devices; on CPU it is
     ignored (there is nothing to accelerate and the scaler would only add
     dtype noise).
@@ -130,6 +138,7 @@ class FitPlan:
     foreground_prob: float = 1 / 3
     augment_resample: bool = False
     augment_intensity: bool = False
+    augment_texture: bool = False
     use_amp: bool = False
     lr_schedule: str = "plateau"
     prefetch_batches: int = 0
@@ -180,14 +189,15 @@ def _batch_factory(
 
     The draw ORDER replicates the inline loop exactly — case index, patch
     sample, mirror/rotate, then the scale/elastic pair when the plan asks,
-    then intensity when the plan asks — so the two paths differ only in
-    WHICH generator the draws come from, never in what a draw means. Only
-    `rng` differs: the producer owns its own generator, spawned from the
-    fit's rng by `fit` (documented there).
+    then intensity when the plan asks, then texture when the plan asks — so
+    the two paths differ only in WHICH generator the draws come from, never
+    in what a draw means. Only `rng` differs: the producer owns its own
+    generator, spawned from the fit's rng by `fit` (documented there).
 
     THE AUGMENTATION ORDER IS PINNED IN TWO PLACES: this factory and the
     inline loop in `VanillaTrainer.fit` must apply the same tiers in the
-    same order (geometric first, intensity last) — keep them in sync.
+    same order (geometric first, then intensity, then texture last) — keep
+    them in sync.
     """
     sampler = PatchSampler(plan.patch_size, foreground_prob=plan.foreground_prob)
     while True:
@@ -200,6 +210,8 @@ def _batch_factory(
             patches = [augment_scale_elastic(p, rng) for p in patches]
         if plan.augment_intensity:
             patches = [augment_intensity(p, rng) for p in patches]
+        if plan.augment_texture:
+            patches = [augment_texture(p, rng) for p in patches]
         yield make_batch(patches)
 
 
@@ -448,11 +460,14 @@ class VanillaTrainer:
                         patches = [augment_mirror_rotate(p, rng) for p in patches]
                         if self.plan.augment_resample:
                             patches = [augment_scale_elastic(p, rng) for p in patches]
-                        # INTENSITY LAST, mirroring _batch_factory — the two
-                        # sites must stay in the same order (geometric first,
-                        # intensity after); see the producer's docstring.
+                        # INTENSITY THEN TEXTURE LAST, mirroring
+                        # _batch_factory — the two sites must stay in the
+                        # same order (geometric first, then intensity, then
+                        # texture after); see the producer's docstring.
                         if self.plan.augment_intensity:
                             patches = [augment_intensity(p, rng) for p in patches]
+                        if self.plan.augment_texture:
+                            patches = [augment_texture(p, rng) for p in patches]
                         images, labels, masks = make_batch(patches)
                     losses.append(self.train_step(
                         torch.as_tensor(images, device=self.device),

@@ -10,18 +10,19 @@ THE PATCH SAMPLER implements nnU-Net's foreground bias because it works: with
 probability `foreground_prob` the patch centre is drawn from the labelled
 foreground, otherwise uniformly. Rare structures actually get seen.
 
-AUGMENTATION has three tiers, and the line between the geometric ones is
+AUGMENTATION has three families, and the line between the geometric ones is
 "can this invent anatomy": mirror along any axis and 90-degree in-plane
 rotation cannot, and apply always; the resampling pair — random zoom and a
 smooth elastic warp — can move a border voxel's influence but is built so it
 never materialises voxels from nothing (zoom-out pads by REFLECTING the
 patch's own border, elastic out-of-range lookups clamp to the nearest real
 voxel). Interpolation rules follow the label/mask-are-discrete contract:
-image cubic, label and mask nearest. The third tier is INTENSITY —
-brightness, contrast, gamma on the image alone — the nnU-Net-parity tier the
-PulmoAI benchmark named as a gap (docs/benchmark-pulmo-2026-10-07.md); it
-invents nothing and moves nothing, so it runs after the geometric tiers and
-leaves label and mask untouched.
+image cubic, label and mask nearest. The two image-only families run after
+the geometric ones and leave label and mask untouched: INTENSITY —
+brightness, contrast, gamma — and TEXTURE — gaussian noise, gaussian blur,
+low-resolution simulation. Those two are the nnU-Net-parity tiers the PulmoAI
+benchmark named as gaps (docs/benchmark-pulmo-2026-10-07.md): nnU-Net
+augments with ~10 transforms, and with texture the family is complete.
 """
 
 from __future__ import annotations
@@ -434,6 +435,134 @@ def augment_intensity(
         centre=patch.centre,
         spacing_mm=patch.spacing_mm,
     )
+
+
+def augment_texture(
+    patch: Patch,
+    rng: np.random.Generator,
+    noise_sigma: tuple[float, float] = (0.0, 0.1),
+    blur_sigma: tuple[float, float] = (0.5, 1.5),
+    lowres_prob: float = 0.25,
+    lowres_factor: tuple[float, float] = (0.5, 0.9),
+) -> Patch:
+    """Random gaussian noise, gaussian blur and low-resolution simulation.
+
+    WHY THESE THREE: they are the last named gap to nnU-Net's augmentation
+    family — nnU-Net augments with ~10 transforms, geometric and intensity
+    tiers already shipped, and these are the missing three (docs/benchmark-
+    pulmo-2026-10-07.md). Each is an nnU-Net transform's equivalent:
+    GaussianNoiseTransform (sensor noise — on the z-scored scale, where
+    0.05-0.1 z-units is the nnU-Net-magnitude equivalent for CT),
+    GaussianBlurTransform (the acquisition PSF — per-axis kernels in VOXELS,
+    so an anisotropically spaced patch is blurred by the same physical
+    acquisition), and SimulateLowResolutionTransform (anisotropic or
+    reconstructed acquisitions — downsample by f and trilinearly upsample
+    back to the patch shape).
+
+    WHY IMAGE-ONLY: every transform here changes HOW the anatomy looks,
+    never WHERE it is — label and mask ride along as the very same array
+    objects, exactly like the intensity tier. A single wrong pixel in the
+    label is a mislabelled voxel.
+
+    WHY AFTER NORMALIZATION: this runs on the z-scored image (the bundle
+    normalization z-scores every case before fit), so `noise_sigma` is in
+    corpus-standard-deviation units and the blur/low-res strengths are
+    spacing-independent voxel quantities — the same meaning on every corpus.
+
+    NEUTRAL PARAMETERS are the identity: `noise_sigma=(0, 0)` adds nothing,
+    a blur draw below 0.3 voxels is skipped (no visible blur), and
+    `lowres_prob=0.0` never resamples; a low-res draw at f >= 0.95 is skipped
+    the same way. The order inside is noise, then blur, then low-res —
+    measurement noise first, then the acquisition PSF, then the anisotropic
+    resampling chain, the same relative order nnU-Net applies them. All the
+    resampling math is torch-native (CPU is fine) for the same measured
+    reason as the geometric tiers: scipy full-resolution filters cost tens of
+    seconds per real patch, torch conv/interpolate costs milliseconds.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    image = patch.image.copy()
+
+    # GAUSSIAN NOISE: one sigma draw, N(0, sigma^2) on every voxel of every
+    # channel, on the z-scored scale.
+    sigma = float(rng.uniform(*noise_sigma))
+    if sigma > 0.0:
+        image += rng.normal(0.0, sigma, image.shape).astype(image.dtype)
+
+    # GAUSSIAN BLUR: one sigma draw in voxels builds the per-axis kernels.
+    sigma = float(rng.uniform(*blur_sigma))
+    if sigma >= 0.3:
+        image = _gaussian_blur3d(image, sigma)
+
+    # LOW-RESOLUTION SIMULATION: downsample by f, upsample back. The skip at
+    # f >= 0.95 keeps near-identity draws from paying the interpolate twice
+    # for nothing.
+    if rng.random() < lowres_prob:
+        factor = float(rng.uniform(*lowres_factor))
+        if factor < 0.95:
+            shape = image.shape[1:]
+            small = tuple(max(int(round(n * factor)), 1) for n in shape)
+            t = torch.from_numpy(np.ascontiguousarray(image)).unsqueeze(0)
+            t = F.interpolate(t, size=small, mode="trilinear",
+                              align_corners=False)
+            t = F.interpolate(t, size=shape, mode="trilinear",
+                              align_corners=False)
+            image = t.squeeze(0).numpy()
+
+    return Patch(
+        image=np.ascontiguousarray(image, dtype=patch.image.dtype),
+        label=patch.label,
+        mask=patch.mask,
+        centre=patch.centre,
+        spacing_mm=patch.spacing_mm,
+    )
+
+
+def _gaussian_blur3d(image: np.ndarray, sigma: float) -> np.ndarray:
+    """3D separable Gaussian blur: three depthwise 1D conv3d passes.
+
+    Kernel size 2*ceil(2.5*sigma)+1 — 2.5 sigmas of support each side, the
+    same truncation nnU-Net's GaussianBlurTransform uses. Each pass
+    unsqueezes the (C,K,J,I) array into (1,C,K,J,I) and convolves along one
+    spatial axis with a (C,1,1,1,W)/(C,1,1,W,1)/(C,1,W,1,1) weight at
+    groups=C. Borders are REFLECTION-padded (F.pad + conv at zero padding),
+    matching scipy's gaussian_filter default: a zero pad would fade the
+    patch border toward 0 and invent an edge the blur is supposed to remove.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    radius = int(np.ceil(2.5 * sigma))
+    coords = np.arange(2 * radius + 1, dtype=np.float32) - radius
+    kernel = np.exp(-(coords * coords) / (2.0 * sigma * sigma))
+    kernel /= kernel.sum()
+    base = torch.from_numpy(kernel)
+
+    t = torch.from_numpy(np.ascontiguousarray(image)).unsqueeze(0)
+    channels = image.shape[0]
+    for axis in (2, 3, 4):  # K, J, I in the (1,C,K,J,I) view
+        # reflect-pad needs pad < axis length; a kernel wider than the patch
+        # (huge sigma on a tiny patch) crops to the axis and renormalizes.
+        limit = t.shape[axis] - 1
+        keep = min(radius, limit)
+        if keep < radius:
+            centre = len(kernel) // 2
+            k = base[centre - keep:centre + keep + 1]
+            k = k / k.sum()
+        else:
+            k = base
+        pads = [0, 0, 0, 0, 0, 0]
+        pads[(4 - axis) * 2] = keep        # left end of the F.pad 6-tuple
+        pads[(4 - axis) * 2 + 1] = keep    # right end
+        t = F.pad(t, pads, mode="reflect")
+        shape = [1, 1, 1, 1, 1]
+        shape[axis] = 2 * keep + 1
+        weight = k.reshape(shape).expand(
+            channels, shape[1], shape[2], shape[3], shape[4]
+        ).contiguous()
+        t = F.conv3d(t, weight, groups=channels)
+    return t.squeeze(0).numpy()
 
 
 def _crop_or_reflect_pad(arr: np.ndarray, target: tuple[int, int, int]) -> np.ndarray:

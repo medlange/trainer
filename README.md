@@ -243,16 +243,21 @@ pass each case's own spacing automatically; library callers spell it
 before preprocessing existed carry no `preprocess.json` and load as
 identity: old bundles keep predicting exactly as they always did.
 
-AUGMENTATION, the family a fit applies on top of those pixels: mirror along
-any axis and 90-degree in-plane rotation (always on — they cannot invent
-anatomy); a random zoom plus a smooth elastic warp (`augment_resample`, on
-for planned runs, `--no-augment-resample` opts out); and the intensity trio
-— random brightness shift, contrast scaling and gamma, applied to the image
-alone after the geometric tiers (`augment_intensity`, the nnU-Net-parity
-tier the PulmoAI benchmark named as a gap: nnU-Net augments intensity, a
-geometry-only stack memorizes one intensity regime and loses foreground Dice
-on low-contrast data). Hand-written `FitPlan`s default both flags off and
-keep byte-exact dynamics; planned runs turn both on.
+AUGMENTATION, the family a fit applies on top of those pixels — now the
+full nnU-Net-parity set, in three families applied in order: GEOMETRIC —
+mirror along any axis and 90-degree in-plane rotation (always on — they
+cannot invent anatomy), plus a random zoom and a smooth elastic warp behind
+`augment_resample` (on for planned runs, `--no-augment-resample` opts out);
+INTENSITY — random brightness shift, contrast scaling and gamma
+(`augment_intensity`, the tier the PulmoAI benchmark named as a gap:
+nnU-Net augments intensity, a geometry-only stack memorizes one intensity
+regime and loses foreground Dice on low-contrast data); and TEXTURE —
+gaussian noise, gaussian blur and low-resolution simulation
+(`augment_texture`), the last missing three of nnU-Net's ~10-transform
+family. Intensity and texture are applied to the image alone after the
+geometric tiers — they change how the anatomy looks, never where it is, so
+label and mask ride along untouched. Hand-written `FitPlan`s default all
+three flags off and keep byte-exact dynamics; planned runs turn all on.
 
 ### Cross-validation, and what a fold is
 
