@@ -43,6 +43,7 @@ a scaler, so the CPU path is the same arithmetic it always was.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -244,6 +245,18 @@ class VanillaTrainer:
         if device.startswith("cuda"):
             torch.backends.cudnn.allow_tf32 = True
             torch.backends.cuda.matmul.allow_tf32 = True
+        # THE OMP-POOL PINCH, diagnosed by faulthandler on the benchmark box
+        # (docs/benchmark-pulmo-2026-10-07.md, W18): torch's intra-op pool is
+        # PROCESS-GLOBAL and defaults to every core. The prefetch producer
+        # thread runs CPU-side torch ops (elastic grid_sample, texture blur
+        # convs) while the training thread runs its own CPU work, and both
+        # fight over that one pool; OpenMP's active-wait then spins every
+        # core at 100% while each op crawls — the multi-hour "stall" that
+        # looked like a hang. A small pool removes the convoy; CUDA work is
+        # untouched (it has its own runtime). nnU-Net never sees this
+        # because its augmenters live in worker PROCESSES, each with its own
+        # pool.
+        torch.set_num_threads(min(8, os.cpu_count() or 8))
         self.criterion = MaskedSegmentationLoss(num_classes=num_classes)
         self.optimizer = torch.optim.SGD(
             net.parameters(), lr=plan.learning_rate,
