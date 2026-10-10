@@ -317,11 +317,23 @@ UNDERCONFIDENCE on the smallest val lesion (55.5k vox, 0.29%), not a
 pipeline break: the case's spacing/intensity/shape are unremarkable
 (the corpus is already 1 mm, so W16 resampling is identity here), and
 the loss already includes masked per-voxel CE, which excludes the
-"missing per-voxel term" hypothesis. Leading remaining hypothesis vs
-nnU-Net: spatial augmentation (elastic/scale), which nnU-Net trains
-with and the intensity-only arm does without — historically exactly
-the tier that buys small-structure robustness. Testable as a clean
-ablation once the deadlock is root-caused.
+"missing per-voxel term" hypothesis.
+
+CASE_0009, GEOGRAPHY (2026-10-11, same bundle). The mass is right-sized
+but in the WRONG PLACE: total foreground probability mass 48.4k voxels
+≈ the GT's 55.5k, yet the top-1% probability centroid sits 158 voxels
+from the GT centroid, and the best dice achievable by ANY global
+threshold is 0.13. nnU-Net's prediction centroid is 24 voxels from the
+GT centroid (dice 0.593). No axis permutation or flip of the GT
+rescues the overlap (identity wins 0.133 vs 0.000 for every
+transpose), so a conversion transpose bug is excluded too. The model
+segments a coherent, confident, ATYPICALLY-PLACED lesion region on
+this case — stable across every Medlange config and seed. That is the
+signature of a model leaning on a location/appearance prior that
+spatial augmentation (elastic/scale) is designed to break; nnU-Net
+trains with that tier, our intensity-only arm does not. HONEST
+SCOPE: n=1 case, hypothesis grade. The fp250 arm (full parity with
+the W21b scipy mitigation) tests it directly.
 
 RELAUNCHED 00:49/00:50: intensity-only (mirror/rotate + intensity,
 `--no-augment-resample --no-augment-texture`), seeds 0 and 1, 250
