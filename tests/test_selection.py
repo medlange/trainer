@@ -70,7 +70,7 @@ def _scripted_selection(monkeypatch, scores: list[float]) -> None:
     (one entry per epoch, consumed in order)."""
     remaining = iter(scores)
 
-    def fake(self, val_cases):
+    def fake(self, val_cases, preprocessing=None):
         return next(remaining)
 
     monkeypatch.setattr(VanillaTrainer, "volume_selection_score", fake)
@@ -291,3 +291,39 @@ def test_resume_restores_the_index_head_as_the_bar(tmp_path, monkeypatch) -> Non
     entries = _index(bundle)
     assert [(e["epoch"], e["score"]) for e in entries] == [(0, pytest.approx(0.90))]
     assert (bundle / "checkpoints" / "epoch-0" / "model.pt").is_file()
+
+
+def test_deployment_dice_equals_the_evaluator_aggregate(tmp_path) -> None:
+    """The only non-lying selector must BE the evaluator: `deployment_dice`
+    on a net must equal `evaluate_predictor`'s aggregate foreground Dice on
+    a predictor built from the SAME net over the SAME raw cases. The
+    benchmark caught the training-grid scorer ranking epochs by grid-overfit
+    (selection 188>172>188-ranked-wrong vs deployment 115>172>188); this pin
+    makes the selector's grid the evaluator's grid, by construction."""
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).parent))
+    from medos_trainer.standalone import evaluate_predictor
+    from medos_trainer.vanilla.infer import load_predictor, save_inference_bundle
+    from medos_trainer.vanilla.nets import UNetConfig, build_unet
+    from medos_trainer.vanilla.preprocess import Preprocessing
+    from medos_trainer.vanilla.selection import deployment_dice
+    from test_vanilla_data import _toy_cases
+
+    net = build_unet(UNetConfig(input_channels=1, num_classes=2,
+                                features=(4, 8, 16), deep_supervision=False))
+    cases = _toy_cases(2, seed=5)
+    preprocessing = Preprocessing.identity()
+
+    save_inference_bundle(tmp_path, net, {"epoch": 0, "loss": 0.0,
+                                          "val_masked_dice_loss": 0.0,
+                                          "lr": 0.0}, patch_size=(16, 16, 16))
+    (tmp_path / "preprocess.json").write_text(
+        '{"target_spacing": [1.0, 1.0, 1.0], '
+        '"normalization": {"mean": 0.0, "std": 1.0}}', encoding="utf-8")
+    rep = evaluate_predictor(load_predictor(tmp_path), cases, out=None)
+    expected = rep["aggregate"]["foreground_mean_mean"]
+    score = deployment_dice(net, preprocessing, (16, 16, 16), cases,
+                            "cpu", max_cases=2)
+    assert score == pytest.approx(expected, abs=1e-9), (score, expected)

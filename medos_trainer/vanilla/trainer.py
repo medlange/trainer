@@ -47,6 +47,7 @@ import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -360,31 +361,45 @@ class VanillaTrainer:
                 )))
         return float(np.mean(scores)) if scores else 0.0
 
-    def volume_selection_score(self, val_cases: list[Case]) -> float:
+    def volume_selection_score(self, val_cases: list[Case],
+                               preprocessing: Any = None) -> float:
         """THE VOLUME SELECTOR'S SEAM: full-volume foreground Dice over up to
         `plan.selection_cases` validation cases — the deployment metric
         (vanilla/selection.py), HIGHER is better. Deliberately a method and
         not an inline call: tests monkeypatch THIS to drive selection
         deterministically, and the trainer's own docstring points here. Runs
         the bare net under autocast when the fit uses AMP, exactly like
-        `validate`."""
-        from medos_trainer.vanilla.selection import volume_dice
+        `validate`.
+
+        WHEN `preprocessing` IS GIVEN, the score is `deployment_dice` — the
+        evaluator's own path replayed on RAW cases. The benchmark caught the
+        training-grid scorer ranking epochs by grid-overfit (selection said
+        188>172>115; the deployment evaluator ranked 115>172>188), so a raw
+        grid is passed in wherever the caller has it. Without it (legacy
+        callers, crossval internals) the training-grid `volume_dice` remains
+        as a documented fallback."""
+        from medos_trainer.vanilla.selection import deployment_dice, volume_dice
 
         net = self._bare_net()
+        scorer = (
+            (lambda n, cases: deployment_dice(
+                n, preprocessing, self.plan.patch_size, cases,
+                self.device, self.plan.selection_cases))
+            if preprocessing is not None else
+            (lambda n, cases: volume_dice(
+                n, cases, self.device, self.plan.selection_cases,
+                patch_size=self.plan.patch_size))
+        )
         if self.scaler is not None:
             with torch.autocast("cuda"):
-                return volume_dice(
-                    net, val_cases, self.device, self.plan.selection_cases,
-                    patch_size=self.plan.patch_size,
-                )
-        return volume_dice(
-            net, val_cases, self.device, self.plan.selection_cases,
-            patch_size=self.plan.patch_size,
-        )
+                return scorer(net, val_cases)
+        return scorer(net, val_cases)
 
     def fit(self, train_cases: list[Case], val_cases: list[Case],
             rng: np.random.Generator, out_dir: str | Path | None = None,
-            resume: dict | None = None) -> dict:
+            resume: dict | None = None,
+            selection_cases_raw: list[Case] | None = None,
+            selection_preprocessing: Any = None) -> dict:
         """Train `plan.epochs` epochs; `resume` continues a saved best state.
 
         `resume` is the dict `load_state` returns: training starts at epoch
@@ -504,7 +519,13 @@ class VanillaTrainer:
                         # FULL-VOLUME FOREGROUND DICE — what deployment scores
                         # (the benchmark lesson: the patch proxy anti-correlated
                         # with this number and overwrote a better bundle).
-                        score = self.volume_selection_score(val_cases)
+                        if selection_cases_raw is not None:
+                            score = self.volume_selection_score(
+                                selection_cases_raw,
+                                preprocessing=selection_preprocessing,
+                            )
+                        else:
+                            score = self.volume_selection_score(val_cases)
                         if self.scheduler is not None:
                             self.scheduler.step(score)
                         record = {

@@ -33,12 +33,17 @@ seconds.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 from medos_trainer.vanilla.data import Case
 from medos_trainer.vanilla.infer import gaussian_window, window_starts
 from medos_trainer.vanilla.nets import VanillaUNet
+
+if TYPE_CHECKING:
+    from medos_trainer.vanilla.preprocess import Preprocessing
 
 #: Windows per forward inside the selector's sliding window — the same small
 #: batch `SlidingWindowPredictor` uses; selection throughput is dominated by
@@ -155,3 +160,65 @@ def _case_foreground_dice(
         denom = int(p.sum()) + int(t.sum())
         per_class.append(2.0 * float((p & t).sum()) / denom if denom else 0.0)
     return float(np.mean(per_class[1:])) if num_classes > 1 else 0.0
+
+
+@torch.no_grad()
+def deployment_dice(
+    net: VanillaUNet,
+    preprocessing: Preprocessing,
+    patch_size: tuple[int, int, int],
+    cases: list[Case],
+    device: str,
+    max_cases: int,
+    overlap: float = 0.5,
+) -> float:
+    """THE ONLY NON-LYING SELECTOR: the deployment metric, replayed end to end.
+
+    SECOND FALSIFICATION, measured on the full-stack benchmark run
+    (docs/benchmark-pulmo-2026-10-07.md, 2026-10-10): scoring full-volume Dice
+    on the ALREADY-RESAMPLED val split ranked epoch 188 > 172 > 115, while
+    the deployment evaluator on raw cases ranked them 115 > 172 > 188 — the
+    selection grid let later epochs overfit the training resampling while raw
+    generalization degraded. Ranking on any grid other than the deployment
+    grid measures the wrong thing. So this selector does exactly what
+    `vanilla-evaluate` does: raw case in, preprocessing replayed by the
+    predictor, probabilities resampled back, Dice on the case's own grid
+    against its own label, restricted to supervised voxels. The cost is the
+    deployment cost per epoch; planned runs accept it.
+    """
+    from medos_trainer.vanilla.infer import SlidingWindowPredictor, served_net
+
+    predictor = SlidingWindowPredictor(
+        served_net(net.to(device)),
+        patch_size=patch_size,
+        overlap=overlap,
+        device=device,
+        preprocessing=preprocessing,
+    )
+    # THE EVALUATOR'S EXACT AGGREGATION (standalone._dice_rows): per-case
+    # per-class Dice over supervised voxels, per-class mean over cases,
+    # foreground mean over classes. Same order of operations, so the score
+    # IS the report number, not a reordering of it.
+    num_classes = int(predictor.net.config.num_classes)
+    rows: list[list[float]] = []
+    for case in cases[:max(1, max_cases)]:
+        label, _ = predictor.predict(case.image, spacing_mm=case.spacing_mm)
+        supervised = (
+            np.ones(case.label.shape, dtype=bool)
+            if case.mask is None
+            else case.mask.max(axis=0) > 0
+        )
+        per_class = []
+        for cls in range(num_classes):
+            predicted = (label == cls) & supervised
+            truth = (case.label == cls) & supervised
+            denom = int(predicted.sum()) + int(truth.sum())
+            per_class.append(
+                2.0 * float((predicted & truth).sum()) / denom if denom else 0.0
+            )
+        rows.append(per_class)
+    if not rows:
+        return 0.0
+    per_class_mean = [float(np.mean([r[cls] for r in rows]))
+                      for cls in range(num_classes)]
+    return float(np.mean(per_class_mean[1:])) if num_classes > 1 else 0.0

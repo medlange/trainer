@@ -446,8 +446,15 @@ def fit_command(
         resume = trainer.load_state(resume_from)
     # UNDER DDP each rank draws its own patch stream: seed+rank. Single
     # process, get_rank() is 0 and the seed is exactly what it always was.
+    # SELECTION SCORES THE DEPLOYMENT PATH: raw val cases replayed through
+    # the bundle preprocessing by the predictor — the training-grid scorer
+    # was caught ranking epochs by grid-overfit (selection 188>172>115 vs
+    # deployment 115>172>188), so the selector gets the raw grid whenever
+    # this command has it.
     result = trainer.fit(train, val, np.random.default_rng(seed + get_rank()),
-                         out_dir=out_dir, resume=resume)
+                         out_dir=out_dir, resume=resume,
+                         selection_cases_raw=val_raw,
+                         selection_preprocessing=preprocessing)
     # THE BUNDLE CARRIES THE PREPROCESSING: the predictor this bundle loads
     # into must replay the resampling and z-score on every incoming image,
     # so the decision lands beside the weights it was made for. (The trainer

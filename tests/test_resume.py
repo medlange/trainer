@@ -79,7 +79,7 @@ def test_fit_command_resume_continues_epoch_numbering_and_best(tmp_path,
 
     dices = iter([0.10, 0.20, 0.30, 0.40])
 
-    def fake_volume_selection(self, val_cases):
+    def fake_volume_selection(self, val_cases, preprocessing=None):
         return next(dices)
 
     monkeypatch.setattr(VanillaTrainer, "volume_selection_score",
@@ -110,7 +110,7 @@ def test_resume_cli_smoke(tmp_path, monkeypatch) -> None:
     dices = iter([0.1, 0.2, 0.3, 0.4])
     monkeypatch.setattr(
         VanillaTrainer, "volume_selection_score",
-        lambda self, val_cases: next(dices),
+        lambda self, val_cases, preprocessing=None: next(dices),
     )
     rc = main(["vanilla-fit", "--data", str(cases), "--preset", "cpu",
                "--out", str(bundle), "--epochs", "2", "--steps-per-epoch", "1"])
