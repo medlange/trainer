@@ -274,6 +274,55 @@ budgets remain untried. What this campaign produced beyond the numbers:
 a framework that learns real low-contrast CT end-to-end at nnU-Net-class
 throughput, with every subsystem it lost to documented and fixed.
 
+## W22 (2026-10-11): the perf question answered with measurements, and
+## the two-seed large result — 0.626 mean fg Dice
+
+THE PAIR IS COMPLETE. `ml-i250f` (seed 0, fp32+TF32/no-AMP after the W21c
+deadlock; finished 11:20, rc=139 — a segfault in process teardown AFTER
+the fit wrote its bundle; the external evaluation scored that bundle
+normally, so the artifact is intact, but the exit-path crash is logged
+as the same CUDA-exit instability class as the W21c deadlock):
+
+| arm | config | fg Dice | 0009 | 0011 | 0013 | 0015 |
+|---|---|---|---|---|---|---|
+| seed 1 (W21d) | intensity-only, AMP | 0.6252 | 0.407 | 0.664 | 0.572 | 0.858 |
+| seed 0 | intensity-only, fp32+TF32 | 0.6276 | 0.316 | 0.563 | 0.766 | 0.866 |
+| **two-seed mean** | | **0.6264** | | | | |
+
+Spread between seeds: 0.0024 — fp32 and AMP agree far inside any
+meaningful threshold; the fp32-forced-by-deadlock restart cost the
+campaign nothing but wall time. Best epochs: s1 at 212, s0 at 173.
+References: nnU-Net 0.782 @ 50 ep, 0.849 @ 250 ep. The gap is now
+−0.156/−0.223; the criterion (comparable to 0.764+) is NOT met, and
+the campaign says so plainly — but the honest Medlange number moved
+0.482 → 0.626 in one day of fixes, and per-case behavior is stable
+across seeds (0013 is now our strongest vs nnU-Net's weakest).
+
+WHERE THE SPEED ACTUALLY GOES (bench_speed.py, RTX 5090, fp32, large
+preset, batch 2 — run on the freed GPU between arms):
+
+- fp32 train step: **426 ms** with cudnn.benchmark (now a trainer
+  default — it was observed in the environment stamp but never set),
+  vs the heuristic path the campaign seeds ran.
+- channels_last_3d: **536 ms — 25% SLOWER, rejected** without a code
+  change. Blackwell/cudnn9 handles NCHW fp32 fine; the layout win is
+  a TensorCore-fp16 story, not ours.
+- selection window batch 2 → 8: **12.0 s → 49.8 s, 4x SLOWER** —
+  the batch-8 hypothesis falsified and REVERTED the same morning it
+  shipped (cc68579). Giant window batches thrash cache and allocator;
+  scores identical (math-neutral as designed), wall time regressed.
+- The measured budget per epoch: 250 × 0.426 = 106 s train + ~12 s
+  selection leaves ~100 s of the fp32 run's 222 s epoch unaccounted
+  → **the CPU producer (patch sampling + augmentation) is the real
+  remaining bottleneck**: fp32 steps got fast enough that one
+  producer thread no longer covers them. W23 candidate: N producer
+  threads (cases are read-only numpy — threads multiply), measured
+  the same way this section was.
+
+STILL IN FLIGHT: xlg250 (6-stage capacity arm, old perf defaults) and
+fp250 (full-parity spatial-tier arm, fp32 + cudnn.benchmark) — both
+no-AMP.
+
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
 
