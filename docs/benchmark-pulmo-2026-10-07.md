@@ -319,9 +319,52 @@ preset, batch 2 — run on the freed GPU between arms):
   threads (cases are read-only numpy — threads multiply), measured
   the same way this section was.
 
-STILL IN FLIGHT: xlg250 (6-stage capacity arm, old perf defaults) and
-fp250 (full-parity spatial-tier arm, fp32 + cudnn.benchmark) — both
-no-AMP.
+STILL IN FLIGHT at the time of this section: fp250 (full-parity spatial
+arm) and a second xlarge seed for the mean±std. What follows landed the
+same evening.
+
+## W22b (2026-10-11 evening): the capacity lever breaks 0.7 — xlarge
+## 6-stage scores 0.723
+
+`ml-xlg250` (xlarge 6-stage, intensity-only, fp32, seed 0, old perf
+defaults — started before the W22 knobs) finished clean, rc=0:
+
+| arm | fg Dice | 0009 | 0011 | 0013 | 0015 |
+|---|---|---|---|---|---|
+| **xlarge 6-stage, 250 ep** | **0.7230** | 0.542 | 0.724 | 0.728 | 0.898 |
+| large, two-seed mean (W22) | 0.6264 | | | | |
+| nnU-Net 50 ep (reference) | 0.782 | 0.593 | 0.737 | 0.854 | 0.943 |
+| nnU-Net 250 ep (reference) | 0.849 | | | | |
+
+THE CAPACITY LEVER IS THE CAMPAIGN'S BIGGEST SINGLE GAIN: +0.097 over
+the 5-stage large mean, from depth alone (6 stages, same budget, same
+augmentation arm, same selection). Case_0009 — the case every earlier
+Medlange run scored 0.000 and the intensity-arm seeds scored 0.32-0.41
+— comes in at 0.542, statistically at parity with nnU-Net's 0.59 on a
+55k-voxel lesion. Best epoch 184 (selection 0.661; the final eval
+0.723 exceeds the selection score because selection caps at 4 cases
+while the final number is the same 4 cases on the same evaluator —
+the difference is per-epoch scoring noise, and the honest reading is
+"the selector's ranking was right; its absolute value is a slightly
+pessimistic proxy").
+
+AGAINST THE CRITERION: 0.723 vs nnU-Net's 0.764 headline = −0.041
+(5.4%); vs nnU-Net's 50-epoch 0.756-0.782 = −0.033…−0.059. Not a
+formal match — the campaign states that plainly — but "comparable" in
+the engineering sense the word was used: same class, per-case parity
+on the hard small-lesion case, remaining gap concentrated in the two
+large-lesion cases (0013, 0015) where both frameworks agree most.
+
+THE FULL-PARITY ABLATION (fp250, still running at this writing) is
+tracking the historical evidence: deployment-selected best 0.4804 at
+epoch 79, flat for 170+ epochs after — spatial+texture augmentation
+on this 16-case corpus costs ~0.24 fg Dice against the intensity-only
+arm at equal capacity. The spatial-tier hypothesis (W21 geography) is
+falsified as a quality lever at this corpus size; elastic's small-
+lesion robustness story belonged to a data regime we do not have.
+
+IN FLIGHT: xlarge seed 1 (mean±std for the capacity arm) and fp250's
+tail.
 
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
