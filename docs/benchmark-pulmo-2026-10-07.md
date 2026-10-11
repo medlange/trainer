@@ -274,6 +274,40 @@ budgets remain untried. What this campaign produced beyond the numbers:
 a framework that learns real low-contrast CT end-to-end at nnU-Net-class
 throughput, with every subsystem it lost to documented and fixed.
 
+## W21d (2026-10-11): first finished run of the honest-selection campaign —
+## seed 1 scores 0.625
+
+`ml-i250s1` (seed 1, intensity-only, AMP, 250 epochs, deployment
+selection) finished at 07:40 after one deadlock restart (see W21c —
+the run that survived was the original AMP process started 00:50).
+
+| | fg Dice (crop val, 4 cases, one evaluator) |
+|---|---|
+| **Medlange seed 1, 250 ep, deployment-selected best** | **0.6252** |
+| nnU-Net 50 ep (reference) | 0.782 |
+| nnU-Net 250 ep (reference) | 0.849 |
+| Medlange campaign best before this run (poly80) | 0.482 |
+
+Per-case: 0009 **0.407** (every previous Medlange run: 0.000), 0011
+0.664, 0013 0.572, 0015 0.858. The best epoch by selection was 212
+(selection score 0.6355); the final evaluation of that bundle scores
+0.6252 — the deployment selector and the final evaluator agree within
+0.01, which is the honest-selection fix doing its job.
+
+WHAT MOVED THE NUMBER. Not one fix — the stack of them: W17 (residual
+encoder, DS weights), W19/W20 (thread cap, prefetch, torch-native
+resample in the selector), W21 (the CLI actually expressing the
+intensity-only arm; deployment selection choosing the checkpoint), and
+the full 250-epoch budget with poly decay. Case_0009's 0.000 → 0.407
+also closes the W21 geography mystery partially: with an honest
+checkpoint choice the model does find the atypical lesion — it was the
+earlier runs' checkpoint SELECTION that kept shipping an empty-
+prediction epoch.
+
+STILL OPEN (in flight at report time): seed 0 fp32/no-AMP rerun for
+the mean±std (the AMP original deadlocked at ~epoch 45, W21c), the
+xlarge 6-stage capacity arm, and the full-parity spatial-tier arm.
+
 ## W21 (2026-10-11): the full-parity deadlock, the missing opt-out, and
 ## what case_0009 actually is
 
