@@ -355,16 +355,24 @@ the engineering sense the word was used: same class, per-case parity
 on the hard small-lesion case, remaining gap concentrated in the two
 large-lesion cases (0013, 0015) where both frameworks agree most.
 
-THE FULL-PARITY ABLATION (fp250, still running at this writing) is
-tracking the historical evidence: deployment-selected best 0.4804 at
-epoch 79, flat for 170+ epochs after — spatial+texture augmentation
-on this 16-case corpus costs ~0.24 fg Dice against the intensity-only
-arm at equal capacity. The spatial-tier hypothesis (W21 geography) is
-falsified as a quality lever at this corpus size; elastic's small-
-lesion robustness story belonged to a data regime we do not have.
+THE FULL-PARITY ABLATION, COMPLETE: fp250 finished clean (rc=0) at 20:37
+with a final deployment fg Dice of **0.4352** (best epoch 79 by selection,
+0.4804; selector slightly optimistic in absolute terms on this run, ranking
+still sound). Per-case: 0009 0.026 (the small-lesion case collapses back
+under spatial+texture augmentation), 0011 0.414, 0013 0.448, 0015 0.853.
+Against the intensity-only arms at the same budget: 0.435 vs 0.626
+(large) / 0.723 (xlarge) — the spatial tier costs 0.19-0.29 fg Dice on
+this 16-case corpus. CONCLUSION RECORDED: the full nnU-Net-parity
+augmentation set, transplanted wholesale, is the wrong default for a
+small corpus; the framework keeps the tiers available (and the W21 CLI
+opt-outs), and the benchmark report now recommends intensity-only for
+corpora of this size. The W20 plan-default decision is superseded by
+this measurement — a plan-default change proposal ships as W24.
 
-IN FLIGHT: xlarge seed 1 (mean±std for the capacity arm) and fp250's
-tail.
+IN FLIGHT at this update: xlarge seed 1 (capacity-arm mean±std), and a
+W23 validation run on the freed GPU0 — 60 epochs of the exact i250f
+configuration under the new three-producer pipeline, to measure the
+producer-bound win against i250f's 3.7 min/epoch.
 
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
