@@ -45,15 +45,13 @@ from medos_trainer.vanilla.nets import VanillaUNet
 if TYPE_CHECKING:
     from medos_trainer.vanilla.preprocess import Preprocessing
 
-#: Windows per forward inside the selector's sliding window. 8 should
-#: saturate a modern card for inference-only forwards (no autograd state)
-#: where 2 leaves the GPU half-idle between window batches — the W22 perf
-#: hypothesis under measurement on the benchmark box. Window batching does
-#: NOT change the math: windows are independent and the gaussian-weighted
-#: accumulation is linear, so the selector's score is comparable across the
-#: change (the only intended difference is wall time). Kept at module scope
-#: so a memory-constrained host can monkeypatch it down.
-_WINDOW_BATCH = 8
+#: Windows per forward inside the selector's sliding window. 2 — the W22
+#: micro-benchmark (bench_speed.py, RTX 5090, fp32) measured batch 8 as 4x
+#: SLOWER than batch 2 (49.8 s vs 12.0 s over four crop cases, identical
+#: scores): giant window batches thrash cache and the allocator where small
+#: batches stream. The batch-8 hypothesis is falsified; kept at module scope
+#: so a future workload can sweep it honestly.
+_WINDOW_BATCH = 2
 
 
 @torch.no_grad()
