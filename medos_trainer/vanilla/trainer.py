@@ -246,6 +246,16 @@ class VanillaTrainer:
         if device.startswith("cuda"):
             torch.backends.cudnn.allow_tf32 = True
             torch.backends.cuda.matmul.allow_tf32 = True
+            # AUTOTUNE THE CONV ALGORITHMS. The training shapes are fixed for
+            # a whole run (plan patch x batch), so cudnn's benchmark mode pays
+            # its one-time search in the first steps and every subsequent
+            # conv3d uses the measured-fastest algo — typically 10-40% off
+            # the fp32 train phase (the W22 perf pass, prompted by "why is
+            # this slow?" — the answer was never custom kernels: the convs
+            # were already cudnn-tuned SASS, just reached through the
+            # default heuristic path). Numerics may shift by an ulp per algo
+            # choice; the fresh-from-seed contract is unaffected.
+            torch.backends.cudnn.benchmark = True
         # THE OMP-POOL PINCH, diagnosed by faulthandler on the benchmark box
         # (docs/benchmark-pulmo-2026-10-07.md, W18): torch's intra-op pool is
         # PROCESS-GLOBAL and defaults to every core. The prefetch producer

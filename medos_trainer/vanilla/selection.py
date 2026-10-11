@@ -45,10 +45,15 @@ from medos_trainer.vanilla.nets import VanillaUNet
 if TYPE_CHECKING:
     from medos_trainer.vanilla.preprocess import Preprocessing
 
-#: Windows per forward inside the selector's sliding window — the same small
-#: batch `SlidingWindowPredictor` uses; selection throughput is dominated by
-#: the window count, not the batching.
-_WINDOW_BATCH = 2
+#: Windows per forward inside the selector's sliding window. 8 should
+#: saturate a modern card for inference-only forwards (no autograd state)
+#: where 2 leaves the GPU half-idle between window batches — the W22 perf
+#: hypothesis under measurement on the benchmark box. Window batching does
+#: NOT change the math: windows are independent and the gaussian-weighted
+#: accumulation is linear, so the selector's score is comparable across the
+#: change (the only intended difference is wall time). Kept at module scope
+#: so a memory-constrained host can monkeypatch it down.
+_WINDOW_BATCH = 8
 
 
 @torch.no_grad()
@@ -192,6 +197,7 @@ def deployment_dice(
         served_net(net.to(device)),
         patch_size=patch_size,
         overlap=overlap,
+        batch_size=_WINDOW_BATCH,
         device=device,
         preprocessing=preprocessing,
     )
