@@ -374,6 +374,17 @@ W23 validation run on the freed GPU0 — 60 epochs of the exact i250f
 configuration under the new three-producer pipeline, to measure the
 producer-bound win against i250f's 3.7 min/epoch.
 
+W23, VALIDATED ON GPU (2026-10-11 ~23:00): the 60-epoch check finished
+clean (rc=0) at **2.2 min/epoch against i250f's 3.7** — a 1.7x wall-time
+win with `prefetch_threads=3` confirmed in the bundle's fit_plan.json,
+and quality on the reference trajectory (selection 0.5296 at epoch 58;
+i250f's own mid-run values sit in the same band). Producers did not
+triple throughput (their numpy work shares the process-global OMP pool
+the training thread also uses, so three producers scale ~sub-linearly) —
+1.7x measured beats 3x imagined. Planned runs ship this by default; the
+fp32 large arm's 250-epoch cost drops from ~9.3 h to ~5.5 h at the same
+quality class.
+
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
 
