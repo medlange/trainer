@@ -179,25 +179,26 @@ class PlannedRun:
             learning_rate=self.learning_rate,
             weight_decay=self.weight_decay,
             foreground_prob=self.foreground_prob,
-            # THE RESAMPLING PAIR IS BACK AS A PLAN DEFAULT, FIXED: the
-            # stall that made it opt-in was not a hang but a ~35 s/patch
-            # scipy path (per-voxel spline evaluation at full resolution).
-            # The torch-native rewrite (interpolate + coarse-field
-            # grid_sample) measures ~0.4 s/patch mean — the same transform
-            # family the prefetch producer can overlap. See
-            # docs/benchmark-pulmo-2026-10-07.md, W18.
-            augment_resample=True,
-            # The INTENSITY tier stays on: it is pure numpy in the producer
-            # thread, never implicated in the stall, and the benchmark named
-            # it a gap (nnU-Net augments intensity, we only did geometry).
+            # THE AUGMENTATION DEFAULT IS INTENSITY-ONLY (W24): the full
+            # nnU-Net-parity set (geometric elastic/scale + texture) was the
+            # W19/W20 default until the fp250 ablation measured it on this
+            # corpus class: 0.435 fg Dice against 0.626 (large) / 0.723
+            # (xlarge) for intensity-only at the same 250-epoch budget — a
+            # 0.19-0.29 penalty, with case_0009 collapsing to 0.026. The
+            # tiers stay AVAILABLE (the W21 CLI flags turn them on, and
+            # corpus size is the documented axis: nnU-Net's own recipe
+            # assumes hundreds of cases; at 16, elastic+texture mostly
+            # distort). See docs/benchmark-pulmo-2026-10-07.md, fp250.
+            augment_resample=False,
+            # The INTENSITY tier stays on: pure numpy in the producer, never
+            # implicated in any stall, and the one tier the benchmark's
+            # ablations consistently credited (it was part of every strong
+            # arm from W17 on).
             augment_intensity=True,
-            # and the TEXTURE tier (gaussian noise / blur / low-resolution
-            # simulation) with it — the benchmark named these the missing
-            # last three of nnU-Net's ~10-transform family, and with them on,
-            # a real plan runs the full nnU-Net-parity set: geometric,
-            # intensity, texture. Torch-native like the geometric tiers, so
-            # the producer thread absorbs its cost.
-            augment_texture=True,
+            # TEXTURE off by the same W24 measurement (its gaussian blur had
+            # a W21 deadlock story too — mitigated by the scipy rewrite, but
+            # the quality ablation is the reason it stays opt-in).
+            augment_texture=False,
             # and a real plan PREFETCHES: the producer thread overlaps patch
             # sampling/augmentation with the GPU step (see prefetch.py) —
             # the benchmark measured ~0.3-0.5 s/step of CPU work the GPU

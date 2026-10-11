@@ -301,23 +301,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vanilla_fit.add_argument(
         "--augment-resample", action="store_true",
-        help="force scale/elastic augmentation ON. It is already a real plan's "
-             "default since the W19 torch-native rewrite (~0.4 s/patch, see the "
-             "benchmark report); this flag only re-affirms the plan.",
+        help="force scale/elastic augmentation ON. A real plan keeps it OFF "
+             "by default since W24: the fp250 ablation measured the full "
+             "nnU-Net-parity set 0.19-0.29 fg Dice WORSE than intensity-only "
+             "on a 16-case corpus (docs/benchmark-pulmo-2026-10-07.md). "
+             "Enable for large corpora where elastic's small-structure "
+             "robustness earns its distortion.",
     )
     vanilla_fit.add_argument(
         "--no-augment-texture", action="store_true",
         help="disable the plan's texture augmentation (gaussian noise / blur / "
-             "low-resolution simulation). The W21 benchmark rerun keeps the "
-             "tier off: a prefetch-thread gaussian-blur conv3d deadlocked "
-             "against AMP's CUDA sync on the benchmark box (GPU idle, two "
-             "identical faulthandler dumps 10 min apart). Off until that "
-             "race is root-caused.",
+             "low-resolution simulation). A real plan keeps it OFF by default "
+             "since W24 (the fp250 quality ablation; and the W21 deadlock — "
+             "mitigated by the scipy rewrite — is the other reason the tier "
+             "stays opt-in).",
     )
     vanilla_fit.add_argument(
         "--augment-texture", action="store_true",
-        help="force texture augmentation ON (a real plan's default). See "
-             "--no-augment-texture for why the opt-out exists.",
+        help="force texture augmentation ON (opt-in since W24; see "
+             "--no-augment-texture).",
     )
     vanilla_fit.add_argument(
         "--amp", action="store_true",
@@ -361,8 +363,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vanilla_crossval.add_argument(
         "--augment-resample", action="store_true",
-        help="force scale/elastic augmentation ON in every fold (already a "
-             "real plan's default since W19)",
+        help="force scale/elastic augmentation ON in every fold (opt-in "
+             "since W24 — see vanilla-fit's --augment-resample)",
     )
     vanilla_crossval.add_argument(
         "--no-augment-texture", action="store_true",
@@ -371,7 +373,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vanilla_crossval.add_argument(
         "--augment-texture", action="store_true",
-        help="force texture augmentation ON in every fold (a real plan's default)",
+        help="force texture augmentation ON in every fold (opt-in since W24)",
     )
 
     vanilla_evaluate = sub.add_parser(

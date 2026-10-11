@@ -63,12 +63,13 @@ def test_prefetcher_surfaces_producer_exception() -> None:
 
 
 def test_multi_producer_delivers_every_item_then_stops() -> None:
-    """n_threads=3, each factory finite with two tagged batches: the consumer
-    sees ALL of them (order ACROSS producers is undefined by design — the
-    contract is the multiset) and StopIteration once the LAST producer's
-    sentinel is absorbed, not the first's. The prefetcher calls one
-    zero-arg factory per thread, so each thread draws its own slice from a
-    lock-guarded handout (same pattern as the trainer's seed handout)."""
+    """n_threads=3, each factory finite with two tagged batches: the
+    consumer sees ALL of them in the FIXED ROTATION order (batch k from
+    producer k mod N — exhausted producers drop from the ring without
+    advancing the position), then StopIteration once the ring empties.
+    The prefetcher calls one zero-arg factory per thread, so each thread
+    draws its own slice from a lock-guarded handout (same pattern as the
+    trainer's seed handout)."""
     import threading
 
     produced = [[_batch(t * 2), _batch(t * 2 + 1)] for t in range(3)]
@@ -83,11 +84,39 @@ def test_multi_producer_delivers_every_item_then_stops() -> None:
     prefetcher = BatchPrefetcher(factory, queue_size=2, n_threads=3)
     try:
         seen = list(prefetcher)
-        assert sorted(int(b[0][0, 0, 0, 0, 0]) for b in seen) == list(range(6))
+        # Rotation: queue0, queue1, queue2, queue0, queue1, queue2.
+        assert [int(b[0][0, 0, 0, 0, 0]) for b in seen] == [0, 2, 4, 1, 3, 5]
         with pytest.raises(StopIteration):
             next(prefetcher)
     finally:
         prefetcher.close()
+
+
+def test_multi_producer_rotation_is_deterministic() -> None:
+    """Two prefetchers over the same factories deliver the IDENTICAL batch
+    sequence: threads change when a batch is ready, never which batch
+    sits at position k — the reproducibility promise survives N
+    producers (this is what the W23 review caught: arrival-order
+    consumption made same-seed fits nondeterministic)."""
+    streams = [[_batch(i * 10 + j) for j in range(4)] for i in range(2)]
+
+    def run_once() -> list[int]:
+        import threading
+
+        slices = iter([iter(s) for s in streams])
+        lock = threading.Lock()
+
+        def factory():
+            with lock:
+                return next(slices)
+
+        p = BatchPrefetcher(factory, queue_size=2, n_threads=2)
+        try:
+            return [int(b[0][0, 0, 0, 0, 0]) for b in p]
+        finally:
+            p.close()
+
+    assert run_once() == run_once() == [0, 10, 1, 11, 2, 12, 3, 13]
 
 
 def test_multi_producer_failure_reaches_the_consumer() -> None:

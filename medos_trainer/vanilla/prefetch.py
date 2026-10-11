@@ -90,12 +90,17 @@ class BatchPrefetcher:
     Producers are pure readers of shared numpy case arrays (writes happen
     only on per-patch copies), so threads scale where processes would not;
     three producers roughly triple the pipeline's throughput ceiling.
-    Ordering across producers is intentionally undefined: training batches
-    are iid draws, so a batch's source thread is not observable in the
-    model. Same-seed runs with different thread counts see different
-    patch streams — the reproducibility promise `fit` documents (fresh
-    from seed, fixed configuration) already pins the configuration.
-    """
+
+    DETERMINISM IS PRESERVED, not traded away: every producer owns its own
+    iterator and queue, and the consumer pulls from the queues in a FIXED
+    ROTATION (batch k comes from queue k mod N, with exhausted producers
+    dropped from the ring). Threads change only WHEN a batch is ready,
+    never WHICH batch sits at position k — so a same-seed fit replays
+    exactly even with N producers, and the reproducibility promise `fit`
+    documents survives the speedup. Same-seed runs with different producer
+    counts see different streams (each count defines its own rotation), as
+    documented on FitPlan.prefetch_threads — same honesty as prefetch
+    itself."""
 
     def __init__(
         self,
@@ -107,19 +112,28 @@ class BatchPrefetcher:
             raise ValueError(f"queue_size is a positive queue depth, got {queue_size}")
         if n_threads < 1:
             raise ValueError(f"n_threads is a positive producer count, got {n_threads}")
-        self._queue: queue.Queue = queue.Queue(maxsize=queue_size)
         self._stop = threading.Event()
-        # Terminal state, remembered so a next() after the end — sentinel,
-        # failure, or close() — answers from memory: the producer threads
-        # are done by then and a fresh _queue.get() would park the consumer
-        # forever. _PENDING = not ended; None = clean StopIteration;
-        # a BaseException = the factory's error, re-raised as-is.
+        # ONE QUEUE PER PRODUCER, and the consumer walks them in a fixed
+        # rotation: batch k is drawn from queue (k mod N), exhausted
+        # producers drop out of the ring. Timing is threaded; ASSIGNMENT
+        # is deterministic — the batch sitting at position k never depends
+        # on thread scheduling, so a same-seed fit replays exactly (see the
+        # class docstring).
+        self._queues: list[queue.Queue] = [
+            queue.Queue(maxsize=queue_size) for _ in range(n_threads)
+        ]
+        self._ring: list[int] = list(range(n_threads))
+        self._ring_pos = 0
+        # Terminal state, remembered so a next() after the end — all
+        # producers exhausted, failure, or close() — answers from memory
+        # instead of parking on an empty queue. _PENDING = not ended; None
+        # = clean StopIteration; a BaseException = a factory's error,
+        # re-raised as-is.
         self._ended: object = _PENDING
-        self._open_threads = n_threads
         self._threads = [
             threading.Thread(
                 target=self._produce,
-                args=(iter_factory,),
+                args=(iter_factory, self._queues[i]),
                 name=f"batch-prefetcher-{i}",
                 daemon=True,
             )
@@ -128,29 +142,28 @@ class BatchPrefetcher:
         for thread in self._threads:
             thread.start()
 
-    def _put(self, item: object) -> bool:
-        """Enqueue, honouring ``close()``; False means the prefetcher was
-        closed and the item should be dropped."""
+    def _put(self, q: queue.Queue, item: object) -> bool:
+        """Enqueue on one producer's queue, honouring ``close()``; False
+        means the prefetcher was closed and the item should be dropped."""
         while not self._stop.is_set():
             try:
-                self._queue.put(item, timeout=0.1)
+                q.put(item, timeout=0.1)
                 return True
             except queue.Full:
-                # A full queue means the consumer is busy, not gone — retry,
-                # unless close() landed while we waited.
+                # A full queue means the consumer is busy, not gone —
+                # retry, unless close() landed while we waited.
                 continue
         return False
 
-    def _produce(self, iter_factory: Callable[[], Iterator[Batch]]) -> None:
+    def _produce(self, iter_factory: Callable[[], Iterator[Batch]],
+                 q: queue.Queue) -> None:
         try:
             for item in iter_factory():
-                if not self._put(item):
+                if not self._put(q, item):
                     return
-            if self._put(_END):
-                with self._queue.mutex:
-                    self._open_threads -= 1
+            self._put(q, _END)
         except Exception as exc:  # noqa: BLE001 — forwarded to the consumer
-            self._put(_Failure(exc))
+            self._put(q, _Failure(exc))
 
     def __iter__(self) -> BatchPrefetcher:
         return self
@@ -159,25 +172,30 @@ class BatchPrefetcher:
         if self._stop.is_set():
             raise StopIteration
         if self._ended is not _PENDING:
-            # The producer is finished; answer the terminal state from memory
-            # (StopIteration for clean exhaustion or close(), the factory's
-            # error otherwise) instead of parking on an empty queue.
+            # Terminal state from memory (StopIteration for clean
+            # exhaustion or close(), a factory's error otherwise) instead
+            # of parking on an empty queue.
             if isinstance(self._ended, BaseException):
                 raise self._ended
             raise StopIteration
-        while True:
-            item = self._queue.get()
+        while self._ring:
+            idx = self._ring[self._ring_pos]
+            item = self._queues[idx].get()
             if item is _END:
-                with self._queue.mutex:
-                    remaining = self._open_threads
-                if remaining == 0:
-                    self._ended = None
-                    raise StopIteration
-                continue  # another producer is still running; keep pulling
+                # This producer is done: drop it from the rotation WITHOUT
+                # advancing, so the next batch takes this slot's successor
+                # deterministically.
+                self._ring.pop(self._ring_pos)
+                if self._ring:
+                    self._ring_pos %= len(self._ring)
+                continue
             if isinstance(item, _Failure):
                 self._ended = item.error
                 raise item.error
+            self._ring_pos = (self._ring_pos + 1) % len(self._ring)
             return item  # type: ignore[return-value]
+        self._ended = None
+        raise StopIteration
 
     def close(self) -> None:
         """Stop the producer threads at their next put (the threads are

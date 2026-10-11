@@ -84,8 +84,11 @@ def test_vanilla_fit_cli_augment_texture_opt_out(tmp_path) -> None:
     control, so a rerun of the known-best intensity-only campaign arm could
     not be expressed from the command line — and the full-parity default
     deadlocked on the benchmark box (prefetch-thread gaussian blur against
-    AMP's CUDA sync). The bundle's fit_plan.json is the fit's own record of
-    what it ran; that is what the assertion reads.
+    AMP's CUDA sync). W24 then flipped the plan default to intensity-only
+    on the fp250 ablation, so this test pins BOTH directions now: the
+    default bundle records texture off, the explicit flags are honoured
+    either way. The bundle's fit_plan.json is the fit's own record of what
+    it ran; that is what the assertion reads.
     """
     cases = _write_cases(tmp_path)
     default_bundle = tmp_path / "default"
@@ -103,7 +106,7 @@ def test_vanilla_fit_cli_augment_texture_opt_out(tmp_path) -> None:
     def read(b):
         return json.loads((b / "fit_plan.json").read_text(
             encoding="utf-8"))["augment_texture"]
-    assert read(default_bundle) is True, "a real plan keeps texture ON"
+    assert read(default_bundle) is False, "W24: a real plan defaults texture OFF"
     assert read(off_bundle) is False, "--no-augment-texture did not reach the fit"
     assert read(on_bundle) is True
 

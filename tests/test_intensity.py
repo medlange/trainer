@@ -178,11 +178,12 @@ def _fg_stats(cases: list[Case]) -> tuple[float, float]:
 
 
 def test_planned_run_carries_intensity() -> None:
-    """A real plan gets the full augmentation family: the INTENSITY tier
-    (pure numpy) and the RESAMPLING pair (torch-native since the W18 fix).
-    A hand-written FitPlan keeps every default off and stays byte-exact."""
+    """W24: a real plan defaults to INTENSITY-ONLY augmentation — the
+    intensity tier (pure numpy) stays on while the resampling pair is
+    opt-in after the fp250 ablation. A hand-written FitPlan keeps every
+    default off and stays byte-exact."""
     fp = collect_fingerprint(_toy_cases(3, seed=0))
     fit_plan = plan_from_fingerprint(fp, "cpu").fit_plan()
     assert fit_plan.augment_intensity is True
-    assert fit_plan.augment_resample is True
+    assert fit_plan.augment_resample is False
     assert FitPlan(patch_size=(16, 16, 16)).augment_intensity is False
