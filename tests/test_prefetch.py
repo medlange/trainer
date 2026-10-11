@@ -62,14 +62,87 @@ def test_prefetcher_surfaces_producer_exception() -> None:
         prefetcher.close()
 
 
+def test_multi_producer_delivers_every_item_then_stops() -> None:
+    """n_threads=3, each factory finite with two tagged batches: the consumer
+    sees ALL of them (order ACROSS producers is undefined by design — the
+    contract is the multiset) and StopIteration once the LAST producer's
+    sentinel is absorbed, not the first's. The prefetcher calls one
+    zero-arg factory per thread, so each thread draws its own slice from a
+    lock-guarded handout (same pattern as the trainer's seed handout)."""
+    import threading
+
+    produced = [[_batch(t * 2), _batch(t * 2 + 1)] for t in range(3)]
+    slices = iter(produced)
+    handout_lock = threading.Lock()
+
+    def factory():
+        with handout_lock:
+            mine = next(slices)
+        return iter(mine)
+
+    prefetcher = BatchPrefetcher(factory, queue_size=2, n_threads=3)
+    try:
+        seen = list(prefetcher)
+        assert sorted(int(b[0][0, 0, 0, 0, 0]) for b in seen) == list(range(6))
+        with pytest.raises(StopIteration):
+            next(prefetcher)
+    finally:
+        prefetcher.close()
+
+
+def test_multi_producer_failure_reaches_the_consumer() -> None:
+    """One of three producers explodes: the consumer may drain healthy
+    batches first, then the failure arrives with type and message intact —
+    and stays terminal on every later call."""
+    import threading
+
+    def healthy(tag: int):
+        yield _batch(tag)
+
+    def broken():
+        yield _batch(99)
+        raise ValueError("thread 2 died")
+
+    sources = iter([lambda: healthy(0), broken, lambda: healthy(2)])
+    handout_lock = threading.Lock()
+
+    def factory():
+        with handout_lock:
+            mine = next(sources)
+        return mine()
+
+    prefetcher = BatchPrefetcher(factory, queue_size=4, n_threads=3)
+    try:
+        seen = []
+        with pytest.raises(ValueError, match="thread 2 died"):
+            for _ in range(10):
+                seen.append(next(prefetcher))
+        assert any(int(b[0][0, 0, 0, 0, 0]) == 99 for b in seen)
+        with pytest.raises(ValueError, match="thread 2 died"):
+            next(prefetcher)
+    finally:
+        prefetcher.close()
+
+
+def test_prefetcher_refuses_zero_threads() -> None:
+    with pytest.raises(ValueError, match="n_threads"):
+        BatchPrefetcher(lambda: iter(()), n_threads=0)
+
+
 def test_fit_plan_refuses_negative_prefetch_batches() -> None:
     with pytest.raises(ValueError, match="prefetch_batches"):
         FitPlan(patch_size=(16, 16, 16), prefetch_batches=-1)
     # 0 is the inline default every existing test relies on.
     assert FitPlan(patch_size=(16, 16, 16)).prefetch_batches == 0
+    with pytest.raises(ValueError, match="prefetch_threads"):
+        FitPlan(patch_size=(16, 16, 16), prefetch_threads=0)
+    # 1 is the historical single-producer default, byte-exact for the
+    # pre-existing suite.
+    assert FitPlan(patch_size=(16, 16, 16)).prefetch_threads == 1
 
 
-def _fit_one(prefetch_batches: int, seed: int, out_dir) -> tuple[VanillaTrainer, dict]:
+def _fit_one(prefetch_batches: int, seed: int, out_dir,
+             prefetch_threads: int = 1) -> tuple[VanillaTrainer, dict]:
     """One toy run at the given queue depth; returns trainer and history."""
     from test_vanilla_data import _toy_cases
 
@@ -78,7 +151,8 @@ def _fit_one(prefetch_batches: int, seed: int, out_dir) -> tuple[VanillaTrainer,
                                 deep_supervision=True, **TOY_NET))
     plan = FitPlan(patch_size=(16, 16, 16), batch_size=2, steps_per_epoch=8,
                    epochs=4, foreground_prob=1.0,
-                   prefetch_batches=prefetch_batches)
+                   prefetch_batches=prefetch_batches,
+                   prefetch_threads=prefetch_threads)
     trainer = VanillaTrainer(net, num_classes=2, plan=plan)
     train, val = _toy_cases(4, seed=0), _toy_cases(2, seed=100)
     result = trainer.fit(train, val, np.random.default_rng(seed), out_dir=out_dir)
@@ -141,3 +215,29 @@ def test_prefetch_and_inline_runs_both_learn(tmp_path) -> None:
     baseline = _val_loss(untrained)
     assert _val_loss(inline) < baseline
     assert _val_loss(prefetch) < baseline
+
+
+def test_fit_with_multi_producer_prefetch_trains(tmp_path) -> None:
+    """The W23 path: three producers feeding one queue is a REAL fit too —
+    finite decreasing losses, a checkpoint on disk, and the trained net
+    beats the untrained twin. (Producer count changes the sample stream by
+    design — same honesty as prefetch itself — so the assertions are the
+    same shape as the single-producer test's, not stream equality.)"""
+    trainer, result = _fit_one(prefetch_batches=2, seed=0,
+                               out_dir=tmp_path / "bundle",
+                               prefetch_threads=3)
+    losses = [record["loss"] for record in result["history"]]
+    assert len(losses) == 4
+    assert all(np.isfinite(losses)), losses
+    assert losses[-1] < losses[0], losses
+    assert (tmp_path / "bundle" / "model.pt").is_file()
+
+    torch.manual_seed(0)
+    untrained = VanillaTrainer(
+        build_unet(UNetConfig(input_channels=1, num_classes=2,
+                              deep_supervision=True, **TOY_NET)),
+        num_classes=2,
+        plan=FitPlan(patch_size=(16, 16, 16), batch_size=2, steps_per_epoch=1,
+                     epochs=1, foreground_prob=1.0),
+    )
+    assert _val_loss(trainer) < _val_loss(untrained)

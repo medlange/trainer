@@ -122,18 +122,24 @@ def test_poly_resume_record_carries_no_scheduler_and_restores(tmp_path) -> None:
 
 
 def test_fit_command_lr_schedule_override(tmp_path) -> None:
-    import json
-
     from medos_trainer.standalone import fit_command
     from test_standalone import _write_cases
 
     cases = _write_cases(tmp_path)
     bundle = tmp_path / "bundle-poly"
-    fit_command(cases, "cpu", bundle, epochs=2, steps_per_epoch=1,
-                lr_schedule="poly")
-    record = json.loads((bundle / "checkpoint.json").read_text(encoding="utf-8"))
-    # poly with epochs=2: the record of epoch 1 carries lr = base*(1-1/2)^0.9
-    assert record["lr"] == pytest.approx(0.01 * 0.5 ** 0.9, rel=1e-6)
+    summary = fit_command(cases, "cpu", bundle, epochs=3, steps_per_epoch=1,
+                          lr_schedule="poly")
+    # THE LAW, NOT THE LUCK: every record's lr is a pure function of its
+    # epoch (steps_per_epoch=1, so each epoch's single step sits at
+    # progress = epoch/epochs). Which epoch the selector keeps is a
+    # sample-stream property — prefetching (and the W23 producer count)
+    # changes that stream BY DESIGN — so the assertion reads the full
+    # history the summary carries, never one checkpoint record.
+    for record in summary["history"]:
+        progress = record["epoch"] / 3
+        assert record["lr"] == pytest.approx(
+            0.01 * (1.0 - progress) ** 0.9, rel=1e-6
+        ), f"epoch {record['epoch']}: lr {record['lr']} not the poly law"
 
 
 def test_fit_command_lr_schedule_refuses_garbage(tmp_path) -> None:

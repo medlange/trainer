@@ -104,13 +104,19 @@ class FitPlan:
     `prefetch_batches` is the data-pipeline overlap: 0 keeps the current
     INLINE sampling loop — the byte-identical, fresh-from-seed-reproducible
     path every existing test pins — and N > 0 runs sampling, augmentation and
-    batch stacking on ONE daemon producer thread (see
-    vanilla/prefetch.py), N batches ahead, so on GPU the patch pipeline
-    overlaps the CUDA work instead of blocking it. PREFETCHING CHANGES THE
-    SAMPLE STREAM: the producer owns a generator spawned from the fit's rng
-    (documented in `fit`), so same-seed inline and prefetch runs see
-    different patches — the same honesty nnU-Net's dataloader workers carry,
-    and why prefetch off is the path tests and reproducibility claims use.
+    batch stacking on daemon producer threads (see vanilla/prefetch.py),
+    N batches ahead, so on GPU the patch pipeline overlaps the CUDA work
+    instead of blocking it. `prefetch_threads` is HOW MANY producers pull
+    batches (1 = the historical single-producer pipeline): producers are
+    pure readers of the shared numpy case arrays, so threads scale the
+    pipeline where one CPU thread starves a fast GPU step (the W22 bench:
+    ~1-2 s of producer work per batch against a ~0.43 s fp32 train step).
+    PREFETCHING CHANGES THE SAMPLE STREAM: each producer owns a generator
+    spawned from the fit's rng (documented in `fit`), so same-seed inline
+    and prefetch runs see different patches, and same-seed runs with
+    different producer counts likewise — the same honesty nnU-Net's
+    dataloader workers carry, and why prefetch off is the path tests and
+    reproducibility claims use.
     `selection` picks what the checkpoint is chosen by: "patch_dice" (the
     default — masked soft Dice LOSS on random patches via `validate`,
     byte-identical to every pre-existing plan and test; the record keeps the
@@ -144,6 +150,7 @@ class FitPlan:
     use_amp: bool = False
     lr_schedule: str = "plateau"
     prefetch_batches: int = 0
+    prefetch_threads: int = 1
     selection: str = "patch_dice"
     selection_cases: int = 4
     keep_checkpoints: int = 3
@@ -158,6 +165,12 @@ class FitPlan:
             raise ValueError(
                 f"prefetch_batches is a queue depth (0 = inline sampling), "
                 f"not a negative number: {self.prefetch_batches}"
+            )
+        if self.prefetch_threads < 1:
+            raise ValueError(
+                f"prefetch_threads is a positive producer count (1 = the "
+                f"historical single-producer pipeline), got "
+                f"{self.prefetch_threads}"
             )
         if self.selection not in ("patch_dice", "volume_dice"):
             raise ValueError(
@@ -476,12 +489,38 @@ class VanillaTrainer:
         history: list[dict] = []
         prefetcher: BatchPrefetcher | None = None
         if self.plan.prefetch_batches > 0:
-            producer_rng = np.random.default_rng(
-                np.random.SeedSequence(int(rng.integers(0, 2**31))).spawn(1)[0]
-            )
+            # ONE CHILD GENERATOR PER PRODUCER THREAD, each spawned from the
+            # fit's rng: the streams are independent (no cross-thread draws),
+            # and the whole batch stays within the reproducibility promise's
+            # documented honesty — prefetching CHANGES THE SAMPLE STREAM
+            # versus inline sampling, by design, exactly as single-producer
+            # prefetch always did; N producers are the same statement with
+            # a different N. W23's reason: the W22 micro-benchmark put one
+            # producer at ~1-2 s/batch against a ~0.43 s fp32 train step —
+            # one CPU thread starves the GPU, and producers are pure readers
+            # of shared numpy cases, so threads scale without pickling.
+            # The prefetcher calls its factory once per thread with no
+            # argument, so a lock-guarded handout assigns each starting
+            # thread its seed deterministically (start order).
+            import threading
+
+            seeds = np.random.SeedSequence(
+                int(rng.integers(0, 2**31))
+            ).spawn(self.plan.prefetch_threads)
+            seed_iter = iter(seeds)
+            seed_lock = threading.Lock()
+
+            def producer_factory() -> Iterator:
+                with seed_lock:
+                    seed = next(seed_iter)
+                return _batch_factory(
+                    train_cases, self.plan, np.random.default_rng(seed)
+                )
+
             prefetcher = BatchPrefetcher(
-                lambda: _batch_factory(train_cases, self.plan, producer_rng),
+                producer_factory,
                 queue_size=self.plan.prefetch_batches,
+                n_threads=self.plan.prefetch_threads,
             )
         try:
             for epoch in range(start_epoch, self.plan.epochs):

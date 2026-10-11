@@ -17,19 +17,23 @@ so a producer thread genuinely runs while the consumer's CUDA kernels do.
 That is the same reasoning torch's own DataLoader uses for its pin_memory
 thread, and the same trade nnU-Net's workers make with more machinery.
 
-THREAD-SAFETY CONTRACT: the factory runs on THIS module's daemon thread, the
-consumer runs on the caller's thread, and the two communicate ONLY through
-the queue. A factory must therefore be a pure reader of its inputs — for the
-trainer, only the case list and the plan; it must never touch the net, the
-optimizer, or any other training-thread state (see the factory's own
-docstring in trainer.py).
+THREAD-SAFETY CONTRACT: the factory runs on THIS module's daemon threads
+(one per `n_threads`), the consumer runs on the caller's thread, and the
+two communicate ONLY through the queue. A factory must therefore be a
+pure reader of its inputs — for the trainer, only the case list and the
+plan; it must never touch the net, the optimizer, or any other
+training-thread state (see the factory's own docstring in trainer.py).
+`iter_factory` is called ONCE PER THREAD, so each producer owns a private
+iterator end to end; give each thread its own numpy generator and the
+streams stay independent (the same changed-sample-stream honesty
+single-producer prefetch already carries — see `VanillaTrainer.fit`).
 
 FAILURE SEMANTICS: a factory exception is captured and re-raised in the
 consumer on the next ``__next__`` — never swallowed, and never a deadlock:
 the sentinel or the failure is always put on the queue eventually. The
-thread is a daemon, so process exit is safe even without ``close()``;
+threads are daemons, so process exit is safe even without ``close()``;
 ``close()`` exists so long-lived processes (tests, services) can drop the
-queue and let the thread wind down promptly.
+queue and let the threads wind down promptly.
 """
 
 from __future__ import annotations
@@ -63,45 +67,66 @@ class _Failure:
 
 
 class BatchPrefetcher:
-    """Pull batches from ``iter_factory`` on one daemon thread into a bounded
-    queue; the consumer reads them through the iterator protocol.
+    """Pull batches from ``iter_factory`` on `n_threads` daemon threads into
+    a bounded queue; the consumer reads them through the iterator protocol.
 
-    ``iter_factory`` is called ONCE, on the producer thread; it is a factory
-    (not an iterator) so the thread owns the iterator end to end. The factory
-    may be endless — the fit loop simply stops calling ``__next__`` — or
-    finite: on exhaustion the thread enqueues a sentinel and the iterator
-    raises ``StopIteration`` on this and every later call. If the factory
-    raises, the exception is re-raised in the consumer at the next
-    ``__next__`` with its type and message intact, and again on any later
-    call.
+    ``iter_factory`` is called ONCE PER PRODUCER THREAD, on that thread; it
+    is a factory (not an iterator) so each thread owns its iterator end to
+    end. The factory may be endless — the fit loop simply stops calling
+    ``__next__`` — or finite: on exhaustion a thread enqueues a sentinel,
+    and the iterator raises ``StopIteration`` on this and every later call
+    once ALL producers have reported (the last sentinel wins, earlier ones
+    are absorbed). If a factory raises, the exception is re-raised in the
+    consumer at the next ``__next__`` with its type and message intact, and
+    again on any later call.
 
-    ``queue_size`` bounds how far the producer may run ahead; each queued
-    entry is one stacked batch (already-allocated numpy arrays), so the memory
-    cost is ``queue_size`` batches, not ``queue_size`` cases.
+    ``queue_size`` bounds how far the producers may run ahead; each queued
+    entry is one stacked batch (already-allocated numpy arrays), so the
+    memory cost is ``queue_size`` batches, not ``queue_size`` cases.
+
+    WHY MORE THAN ONE THREAD (W23): the W22 micro-benchmark showed the
+    fp32 train step at ~426 ms while one producer spends ~1-2 s per batch
+    on sampling + augmentation — the GPU starves waiting on ONE CPU thread.
+    Producers are pure readers of shared numpy case arrays (writes happen
+    only on per-patch copies), so threads scale where processes would not;
+    three producers roughly triple the pipeline's throughput ceiling.
+    Ordering across producers is intentionally undefined: training batches
+    are iid draws, so a batch's source thread is not observable in the
+    model. Same-seed runs with different thread counts see different
+    patch streams — the reproducibility promise `fit` documents (fresh
+    from seed, fixed configuration) already pins the configuration.
     """
 
     def __init__(
         self,
         iter_factory: Callable[[], Iterator[Batch]],
         queue_size: int = 4,
+        n_threads: int = 1,
     ) -> None:
         if queue_size < 1:
             raise ValueError(f"queue_size is a positive queue depth, got {queue_size}")
+        if n_threads < 1:
+            raise ValueError(f"n_threads is a positive producer count, got {n_threads}")
         self._queue: queue.Queue = queue.Queue(maxsize=queue_size)
         self._stop = threading.Event()
         # Terminal state, remembered so a next() after the end — sentinel,
-        # failure, or close() — answers from memory: the producer thread is
-        # done by then and a fresh _queue.get() would park the consumer
+        # failure, or close() — answers from memory: the producer threads
+        # are done by then and a fresh _queue.get() would park the consumer
         # forever. _PENDING = not ended; None = clean StopIteration;
         # a BaseException = the factory's error, re-raised as-is.
         self._ended: object = _PENDING
-        self._thread = threading.Thread(
-            target=self._produce,
-            args=(iter_factory,),
-            name="batch-prefetcher",
-            daemon=True,
-        )
-        self._thread.start()
+        self._open_threads = n_threads
+        self._threads = [
+            threading.Thread(
+                target=self._produce,
+                args=(iter_factory,),
+                name=f"batch-prefetcher-{i}",
+                daemon=True,
+            )
+            for i in range(n_threads)
+        ]
+        for thread in self._threads:
+            thread.start()
 
     def _put(self, item: object) -> bool:
         """Enqueue, honouring ``close()``; False means the prefetcher was
@@ -121,7 +146,9 @@ class BatchPrefetcher:
             for item in iter_factory():
                 if not self._put(item):
                     return
-            self._put(_END)
+            if self._put(_END):
+                with self._queue.mutex:
+                    self._open_threads -= 1
         except Exception as exc:  # noqa: BLE001 — forwarded to the consumer
             self._put(_Failure(exc))
 
@@ -138,17 +165,22 @@ class BatchPrefetcher:
             if isinstance(self._ended, BaseException):
                 raise self._ended
             raise StopIteration
-        item = self._queue.get()
-        if item is _END:
-            self._ended = None
-            raise StopIteration
-        if isinstance(item, _Failure):
-            self._ended = item.error
-            raise item.error
-        return item  # type: ignore[return-value]
+        while True:
+            item = self._queue.get()
+            if item is _END:
+                with self._queue.mutex:
+                    remaining = self._open_threads
+                if remaining == 0:
+                    self._ended = None
+                    raise StopIteration
+                continue  # another producer is still running; keep pulling
+            if isinstance(item, _Failure):
+                self._ended = item.error
+                raise item.error
+            return item  # type: ignore[return-value]
 
     def close(self) -> None:
-        """Stop the producer thread at its next put (the thread is a daemon,
-        so this is a courtesy for long-lived processes, not a correctness
-        requirement)."""
+        """Stop the producer threads at their next put (the threads are
+        daemons, so this is a courtesy for long-lived processes, not a
+        correctness requirement)."""
         self._stop.set()

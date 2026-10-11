@@ -39,6 +39,7 @@ WHAT THE PLAN DECIDES, and the reasoning the audit can quote:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from statistics import median
 
@@ -203,6 +204,13 @@ class PlannedRun:
             # waited on. Hand-written FitPlans keep 0 (byte-exact, the test
             # suite's reproducible path).
             prefetch_batches=4,
+            # and a real plan PRODUCES FROM EVERY CORE IT CAN SPARE: the
+            # W22 bench put one producer at ~1-2 s/batch against a ~0.43 s
+            # fp32 train step — one thread starves the GPU. Producers are
+            # pure readers of the shared numpy cases, so threads scale
+            # (the W23 change); capped at 3, and only on hosts with enough
+            # cores to spare them beside the training thread's own pool.
+            prefetch_threads=min(3, max(1, (os.cpu_count() or 8) // 16)),
             # POLY, NOT PLATEAU: the budget sweep caught the plateau arm's
             # patience=2 annealing lr to ~0 by epoch ~15 of any long run —
             # 160 epochs scored WORSE than 40 (0.413 vs 0.427) because the
