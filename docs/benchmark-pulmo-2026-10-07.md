@@ -409,6 +409,56 @@ nnU-Net across seeds as well — logged as future work, not done.
 s2 (third seed, new perf stack) runs to ~07:45 for the three-seed
 mean.
 
+## W23-FINAL (2026-10-12, 07:41): the campaign's verdict — all arms
+## measured, one evaluator, one split
+
+s2 finished clean (rc=0) at **0.6882** (per-case 0.496/0.683/0.714/0.860;
+best epoch 236). THREE-SEED XLARGE: **0.7230 / 0.6365 / 0.6882 →
+mean 0.683, sample std 0.044**. The three existing bundles then voted
+as a probability-mean ensemble (no new training — the standard
+nnU-Net-fighting move, measured because the CLI's ensemble path
+exists for exactly this): **ensemble fg Dice 0.7137** (0.492/0.716/
+0.750/0.896) — +0.031 over the seed mean, −0.009 under the lucky
+best seed. Ensembling recovers seed variance; it does not invent
+signal beyond the best draw.
+
+THE COMPLETE TABLE (crop val, 4 cases, Medlange's own evaluator for
+both frameworks, nnU-Net's NIfTI predictions imported):
+
+| arm | params | fg Dice |
+|---|---|---|
+| Medlange large 5-stage, mean 2 seeds | 21.75M (−30% vs nnU-Net) | 0.6264 ± 0.002 |
+| Medlange xlarge 6-stage, mean 3 seeds | 38.45M (+25%) | 0.6826 ± 0.044 |
+| Medlange xlarge 3-seed ensemble | 3 × 38.45M | **0.7137** |
+| Medlange full-parity ablation (1 seed) | 38.45M | 0.4352 |
+| nnU-Net v2 3d_fullres, single runs | 30.79M | 0.716@5ep · 0.657@10 · 0.756–0.782@50 · 0.849@250 |
+
+CRITERION ASSESSMENT, stated without hedging: "Medlange fg Dice > 0
+and comparable to nnU-Net 0.764" — fg > 0 is exceeded by an order of
+magnitude (the campaign's opening number on this task was 0.000);
+**"comparable to 0.764" is NOT met**: the best honest configuration
+(the seed ensemble) reaches 0.714 = 93.4% of the reference, −0.050,
+and the three-seed mean sits at −0.081. Against nnU-Net's own 250-epoch
+0.849 the gap is −0.135. The campaign closes with the gap measured,
+not closed.
+
+WHAT THE GAP IS MADE OF (per-case, ensemble vs nnU-Net@50): 0009
+0.492 vs 0.593 (−0.10, small-lesion case, our historical zero), 0011
+0.716 vs 0.737 (−0.02, parity), 0013 0.750 vs 0.854 (−0.10), 0015
+0.896 vs 0.943 (−0.05). The residual is broad, not one pathology.
+
+WHAT WOULD CLOSE IT, in honest order of expected value: (1) MORE
+TRAINING DATA — 16 cases is the binding constraint both frameworks
+share, and nnU-Net's recipe is tuned for hundreds; (2) seeded nnU-Net
+runs — its reference numbers here are single runs too, and the fair
+claim needs its variance (the mean may be lower than 0.782); (3)
+1000-epoch budgets at xlarge capacity (nnU-Net's own default is 1000;
+we stopped at 250); (4) cascade/crossval ensembles already shipped in
+the CLI, untested at this scale. The W16 preprocessing-parity goal
+itself — normalization, median-spacing resampling, bundle-carried
+preprocessing — is fully achieved and tested; the Dice criterion
+remains open under this goal.
+
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
 
