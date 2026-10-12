@@ -396,6 +396,19 @@ the training thread also uses, so three producers scale ~sub-linearly) —
 fp32 large arm's 250-epoch cost drops from ~9.3 h to ~5.5 h at the same
 quality class.
 
+W22c (2026-10-12, 04:42): xlarge seed 1 finished — and the spread is
+the story. s1 scores **0.6365** (per-case 0.394/0.617/0.691/0.844;
+rc=139, the same CUDA-exit segfault class as i250f, artifacts intact)
+against s0's 0.7230. Two-seed xlarge: **mean 0.680, spread 0.087**
+(sample std ~0.061) — versus the large arm's near-perfect agreement
+(0.6264 ± 0.0024). The W22 warning materialized exactly: n=4 val
+cases makes ±0.1 differences noise, and the 6-stage net's seed
+variance is real. NOTE FOR SYMMETRY: nnU-Net's own reference numbers
+here are single runs too; a fully seeded comparison would re-run
+nnU-Net across seeds as well — logged as future work, not done.
+s2 (third seed, new perf stack) runs to ~07:45 for the three-seed
+mean.
+
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
 
