@@ -147,6 +147,7 @@ class FitPlan:
     augment_resample: bool = False
     augment_intensity: bool = False
     augment_texture: bool = False
+    augment_probs: dict | None = None
     use_amp: bool = False
     lr_schedule: str = "plateau"
     prefetch_batches: int = 0
@@ -172,6 +173,21 @@ class FitPlan:
                 f"historical single-producer pipeline), got "
                 f"{self.prefetch_threads}"
             )
+        if self.augment_probs is not None:
+            allowed = ("scale_prob", "elastic_prob", "noise_prob",
+                       "blur_prob", "lowres_prob")
+            unknown = set(self.augment_probs) - set(allowed)
+            if unknown:
+                raise ValueError(
+                    f"augment_probs keys must be a subset of {allowed}, "
+                    f"got unknown: {sorted(unknown)}"
+                )
+            for key, value in self.augment_probs.items():
+                if not 0.0 <= float(value) <= 1.0:
+                    raise ValueError(
+                        f"augment_probs[{key!r}] is a probability in [0, 1], "
+                        f"got {value!r}"
+                    )
         if self.selection not in ("patch_dice", "volume_dice"):
             raise ValueError(
                 f"selection must be one of ('patch_dice', 'volume_dice'), "
@@ -188,6 +204,18 @@ class FitPlan:
                 f"(1 = the single best only, the historical layout); "
                 f"0 is refused: {self.keep_checkpoints}"
             )
+
+
+def _tier_kwargs(plan: FitPlan, names: tuple[str, ...]) -> dict:
+    """The dosage-gate subset of `plan.augment_probs` for one tier's callees.
+
+    W26: `FitPlan.augment_probs` carries per-transform draw probabilities
+    (nnU-Net-class dosage); each augmentation function only accepts its own
+    gates, so this filters by the callee's parameter names and returns {}
+    when the plan carries no profile (the historical full-dose behavior).
+    """
+    profile = plan.augment_probs or {}
+    return {k: float(v) for k, v in profile.items() if k in names}
 
 
 def _batch_factory(
@@ -212,9 +240,14 @@ def _batch_factory(
     THE AUGMENTATION ORDER IS PINNED IN TWO PLACES: this factory and the
     inline loop in `VanillaTrainer.fit` must apply the same tiers in the
     same order (geometric first, then intensity, then texture last) — keep
-    them in sync.
+    them in sync. THE DOSAGE PROFILE (W26, `plan.augment_probs`) rides both
+    call sites the same way: the per-transform probability gates filter by
+    the callee's own parameter names, so unknown keys never leak across
+    tiers.
     """
     sampler = PatchSampler(plan.patch_size, foreground_prob=plan.foreground_prob)
+    geo_kwargs = _tier_kwargs(plan, ("scale_prob", "elastic_prob"))
+    tex_kwargs = _tier_kwargs(plan, ("noise_prob", "blur_prob", "lowres_prob"))
     while True:
         patches = [
             sampler.sample(cases[int(rng.integers(0, len(cases)))], rng)
@@ -222,11 +255,11 @@ def _batch_factory(
         ]
         patches = [augment_mirror_rotate(p, rng) for p in patches]
         if plan.augment_resample:
-            patches = [augment_scale_elastic(p, rng) for p in patches]
+            patches = [augment_scale_elastic(p, rng, **geo_kwargs) for p in patches]
         if plan.augment_intensity:
             patches = [augment_intensity(p, rng) for p in patches]
         if plan.augment_texture:
-            patches = [augment_texture(p, rng) for p in patches]
+            patches = [augment_texture(p, rng, **tex_kwargs) for p in patches]
         yield make_batch(patches)
 
 
@@ -522,6 +555,12 @@ class VanillaTrainer:
                 queue_size=self.plan.prefetch_batches,
                 n_threads=self.plan.prefetch_threads,
             )
+        # DOSAGE GATES for the inline path — the same subsets the producer
+        # computes in _batch_factory; both sites must see identical kwargs
+        # (the two draw the same tiers in the same order; see the producer
+        # docstring).
+        geo_kwargs = _tier_kwargs(self.plan, ("scale_prob", "elastic_prob"))
+        tex_kwargs = _tier_kwargs(self.plan, ("noise_prob", "blur_prob", "lowres_prob"))
         try:
             for epoch in range(start_epoch, self.plan.epochs):
                 losses = []
@@ -536,15 +575,19 @@ class VanillaTrainer:
                         ]
                         patches = [augment_mirror_rotate(p, rng) for p in patches]
                         if self.plan.augment_resample:
-                            patches = [augment_scale_elastic(p, rng) for p in patches]
+                            patches = [
+                                augment_scale_elastic(p, rng, **geo_kwargs)
+                                for p in patches
+                            ]
                         # INTENSITY THEN TEXTURE LAST, mirroring
                         # _batch_factory — the two sites must stay in the
                         # same order (geometric first, then intensity, then
-                        # texture after); see the producer's docstring.
+                        # texture after) and carry the same dosage gates;
+                        # see the producer's docstring.
                         if self.plan.augment_intensity:
                             patches = [augment_intensity(p, rng) for p in patches]
                         if self.plan.augment_texture:
-                            patches = [augment_texture(p, rng) for p in patches]
+                            patches = [augment_texture(p, rng, **tex_kwargs) for p in patches]
                         images, labels, masks = make_batch(patches)
                     losses.append(self.train_step(
                         torch.as_tensor(images, device=self.device),

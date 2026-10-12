@@ -199,6 +199,17 @@ class PlannedRun:
             # a W21 deadlock story too — mitigated by the scipy rewrite, but
             # the quality ablation is the reason it stays opt-in).
             augment_texture=False,
+            # DOSAGE PROFILE (W26): when a tier IS enabled, planned runs draw
+            # each transform at nnU-Net-class probabilities instead of the
+            # historical every-patch full dose — the fp250 ablation measured
+            # that the dose, not the transform family, was the 0.29 fg Dice
+            # difference (all-axes lowres at p=0.25 erases small lesions;
+            # nnU-Net's per-axis draw hits all three axes on ~1.6% of
+            # patches). Hand-written FitPlans keep augment_probs=None =
+            # full dose, byte-exact with every pre-W26 test and bundle.
+            augment_probs={"scale_prob": 0.2, "elastic_prob": 0.2,
+                           "noise_prob": 0.15, "blur_prob": 0.15,
+                           "lowres_prob": 0.25},
             # and a real plan PREFETCHES: the producer thread overlaps patch
             # sampling/augmentation with the GPU step (see prefetch.py) —
             # the benchmark measured ~0.3-0.5 s/step of CPU work the GPU

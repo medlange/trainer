@@ -209,6 +209,8 @@ def augment_scale_elastic(
     scale_range: tuple[float, float] = (0.85, 1.25),
     elastic_alpha_mm: float = 2.0,
     elastic_grid: tuple[int, int, int] = (4, 4, 4),
+    scale_prob: float = 1.0,
+    elastic_prob: float = 1.0,
 ) -> Patch:
     """Random per-axis zoom, then a smooth elastic warp — patch-shaped output.
 
@@ -242,19 +244,33 @@ def augment_scale_elastic(
     `elastic_alpha_mm` is a PHYSICAL magnitude, converted to voxels through
     `patch.spacing_mm`, so the same number means the same deformation on
     0.5 mm CT and 3 mm thick-slice data.
+
+    DOSAGE (W26): `scale_prob` and `elastic_prob` are PER-PATCH draw gates —
+    nnU-Net applies each geometric transform with p~0.2, where this tier's
+    original build applied BOTH to EVERY patch. The fp250 ablation measured
+    that full-dose parity costs 0.29 fg Dice on a 16-case corpus, so the
+    dose is the variable, not the transform family. Probabilities default to
+    1.0 = the historical full-dose behavior every existing test pins; a
+    planned run can carry the nnU-Net-class profile through FitPlan.
     """
 
     image, label, mask = patch.image, patch.label, patch.mask
     shape = tuple(int(v) for v in image.shape[1:])
 
-    factors = rng.uniform(scale_range[0], scale_range[1], size=3)
-    if not np.all(factors == 1.0):
-        image = _resample_to_shape(image, shape, factors, bilinear=True)
-        label = _resample_to_shape(label, shape, factors, bilinear=False)
-        if mask is not None:
-            mask = _resample_to_shape(mask, shape, factors, bilinear=False)
+    # Gates short-circuit at prob >= 1.0 WITHOUT consuming an rng draw: the
+    # full-dose default then replays the pre-W26 random stream bit-exactly
+    # (the campaign's reproducible runs and pins depend on it).
+    if scale_prob >= 1.0 or rng.random() < scale_prob:
+        factors = rng.uniform(scale_range[0], scale_range[1], size=3)
+        if not np.all(factors == 1.0):
+            image = _resample_to_shape(image, shape, factors, bilinear=True)
+            label = _resample_to_shape(label, shape, factors, bilinear=False)
+            if mask is not None:
+                mask = _resample_to_shape(mask, shape, factors, bilinear=False)
 
-    if elastic_alpha_mm > 0.0:
+    if elastic_alpha_mm > 0.0 and (
+        elastic_prob >= 1.0 or rng.random() < elastic_prob
+    ):
         field = _elastic_field(shape, patch.spacing_mm, elastic_alpha_mm,
                                elastic_grid, rng)
         image = _warp(image, field, bilinear=True)
@@ -444,6 +460,8 @@ def augment_texture(
     blur_sigma: tuple[float, float] = (0.5, 1.5),
     lowres_prob: float = 0.25,
     lowres_factor: tuple[float, float] = (0.5, 0.9),
+    noise_prob: float = 1.0,
+    blur_prob: float = 1.0,
 ) -> Patch:
     """Random gaussian noise, gaussian blur and low-resolution simulation.
 
@@ -469,15 +487,26 @@ def augment_texture(
     corpus-standard-deviation units and the blur/low-res strengths are
     spacing-independent voxel quantities — the same meaning on every corpus.
 
-    NEUTRAL PARAMETERS are the identity: `noise_sigma=(0, 0)` adds nothing,
-    a blur draw below 0.3 voxels is skipped (no visible blur), and
-    `lowres_prob=0.0` never resamples; a low-res draw at f >= 0.95 is skipped
-    the same way. The order inside is noise, then blur, then low-res —
-    measurement noise first, then the acquisition PSF, then the anisotropic
-    resampling chain, the same relative order nnU-Net applies them. All the
-    resampling math is torch-native (CPU is fine) for the same measured
-    reason as the geometric tiers: scipy full-resolution filters cost tens of
-    seconds per real patch, torch conv/interpolate costs milliseconds.
+    DOSAGE (W26): `noise_prob`/`blur_prob` are PER-PATCH draw gates, and the
+    low-res simulation is PER-AXIS — each axis independently downsamples with
+    probability `lowres_prob`, exactly nnU-Net's SimulateLowResolution
+    (p_per_axis). The fp250 ablation pinned the historical build's wholesale
+    all-axes low-res (25% of patches at factor 0.5 erases a 40-voxel lesion:
+    case_0009 collapsed to 0.026); nnU-Net's simultaneous three-axis shrink
+    hits ~1.6% of patches, ours now matches that dose class. Noise and blur
+    probabilities default to 1.0 = the historical every-patch behavior the
+    texture tests pin.
+
+    NEUTRAL PARAMETERS are the identity: `noise_sigma=(0, 0)` or
+    `noise_prob=0` adds nothing, `blur_prob=0` or a blur draw below 0.3
+    voxels is skipped (no visible blur), and `lowres_prob=0.0` never
+    resamples; a per-axis low-res draw at f >= 0.95 is skipped the same way.
+    The order inside is noise, then blur, then low-res — measurement noise
+    first, then the acquisition PSF, then the anisotropic resampling chain,
+    the same relative order nnU-Net applies them. All the resampling math is
+    torch-native (CPU is fine) for the same measured reason as the geometric
+    tiers: scipy full-resolution filters cost tens of seconds per real
+    patch, torch conv/interpolate costs milliseconds.
     """
     import torch
     import torch.nn.functional as F
@@ -486,29 +515,42 @@ def augment_texture(
 
     # GAUSSIAN NOISE: one sigma draw, N(0, sigma^2) on every voxel of every
     # channel, on the z-scored scale.
-    sigma = float(rng.uniform(*noise_sigma))
-    if sigma > 0.0:
-        image += rng.normal(0.0, sigma, image.shape).astype(image.dtype)
+    # Gates short-circuit at prob >= 1.0 without consuming an rng draw (the
+    # full-dose default replays the pre-W26 stream bit-exactly); the low-res
+    # axis draws stay per-axis by design — that semantic change is the point
+    # of W26 and its draw-count difference only affects dosed runs.
+    if noise_prob >= 1.0 or rng.random() < noise_prob:
+        sigma = float(rng.uniform(*noise_sigma))
+        if sigma > 0.0:
+            image += rng.normal(0.0, sigma, image.shape).astype(image.dtype)
 
-    # GAUSSIAN BLUR: one sigma draw in voxels builds the per-axis kernels.
-    sigma = float(rng.uniform(*blur_sigma))
-    if sigma >= 0.3:
-        image = _gaussian_blur3d(image, sigma)
+    if blur_prob >= 1.0 or rng.random() < blur_prob:
+        sigma = float(rng.uniform(*blur_sigma))
+        if sigma >= 0.3:
+            image = _gaussian_blur3d(image, sigma)
 
-    # LOW-RESOLUTION SIMULATION: downsample by f, upsample back. The skip at
-    # f >= 0.95 keeps near-identity draws from paying the interpolate twice
-    # for nothing.
-    if rng.random() < lowres_prob:
-        factor = float(rng.uniform(*lowres_factor))
-        if factor < 0.95:
-            shape = image.shape[1:]
-            small = tuple(max(int(round(n * factor)), 1) for n in shape)
-            t = torch.from_numpy(np.ascontiguousarray(image)).unsqueeze(0)
-            t = F.interpolate(t, size=small, mode="trilinear",
-                              align_corners=False)
-            t = F.interpolate(t, size=shape, mode="trilinear",
-                              align_corners=False)
-            image = t.squeeze(0).numpy()
+    # LOW-RESOLUTION SIMULATION, PER-AXIS (nnU-Net's SimulateLowResolution
+    # semantics): each axis independently downsamples with probability
+    # `lowres_prob` and its own factor draw, then everything returns to the
+    # patch shape. An axis left alone keeps its full resolution, so a lesion
+    # erased along one axis survives on the others — the difference between
+    # this and the historical all-axes draw is what the fp250 decomposition
+    # measured.
+    factors = np.ones(3, dtype=np.float64)
+    drew = False
+    for axis in range(3):
+        if rng.random() < lowres_prob:
+            f = float(rng.uniform(*lowres_factor))
+            if f < 0.95:
+                factors[axis] = f
+                drew = True
+    if drew:
+        shape = tuple(int(v) for v in image.shape[1:])
+        small = tuple(max(int(round(n * f)), 1) for n, f in zip(shape, factors))
+        t = torch.from_numpy(np.ascontiguousarray(image)).unsqueeze(0)
+        t = F.interpolate(t, size=small, mode="trilinear", align_corners=False)
+        t = F.interpolate(t, size=shape, mode="trilinear", align_corners=False)
+        image = t.squeeze(0).numpy()
 
     return Patch(
         image=np.ascontiguousarray(image, dtype=patch.image.dtype),
