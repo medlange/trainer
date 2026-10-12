@@ -459,6 +459,43 @@ itself — normalization, median-spacing resampling, bundle-carried
 preprocessing — is fully achieved and tested; the Dice criterion
 remains open under this goal.
 
+WHY BEHIND AT (INTERPOLATED) PARAMETER PARITY — the mechanism
+analysis (2026-10-12, code facts, ranked):
+
+1. DOSAGE, NOT POLICY, IS THE LIKELY GAP. Our augmentation tiers are
+   boolean: when on, the transform hits EVERY patch (trainer.py calls
+   them with no per-transform probability gate). nnU-Net draws each
+   geometric transform with p~0.2 per patch. The fp250 full-parity arm
+   (−0.29) was several times their dose — "full parity hurts" really
+   means "our dose of it hurts". The specific small-lesion killer is
+   measurable: our lowres simulation runs at lowres_prob=0.25 with
+   factor as low as 0.5 across ALL axes at once — a ~40-voxel lesion
+   (case_0009) halves to 20 voxels and back, trilinearly. nnU-Net's
+   SimulateLowResolution is PER-AXIS p=0.25: simultaneous three-axis
+   shrink hits ~1.6% of patches, ours 25%. Consistent with fp250's
+   case_0009 collapsing to 0.026.
+2. RECIPE HERITAGE: their ranges are tuned on hundreds of datasets;
+   ours are first-reasonable. Even at net parity the recipe is half
+   the result.
+3. ARCHITECTURE MICRO-DIFFERENCES (unmeasured in isolation): norms
+   MATCH (InstanceNorm affine both sides — verified in nets.py);
+   differences remain — our residual blocks vs their plain, their
+   anisotropic final stride [2,1,2] fitted to the data spacing vs our
+   uniform downsampling, deep supervision on ours (a plus) vs none.
+4. STATISTICAL ASYMMETRY: their 0.756-0.782 are single runs; our
+   0.683 is a three-seed mean ± 0.044. Seeded nnU-Net runs would
+   likely land lower.
+5. DATA: 16 training cases starve both; their correctly-dosed
+   augmentation diversity compensates better than our intensity-only
+   arm.
+
+NEXT WAVE (after W25 frees the GPUs): per-tier decomposition of the
+fp250 failure (elastic-only / texture-only arms at 250 epochs), then
+a dosage fix (per-transform probabilities as in nnU-Net, per-axis
+lowres, factor floor ~0.75) — converting "full parity hurts" into
+"tier X at dose Y hurts/helps"; anisotropic strides from the
+fingerprint; seeded nnU-Net for a symmetric comparison.
+
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
 
