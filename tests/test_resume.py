@@ -121,3 +121,26 @@ def test_resume_cli_smoke(tmp_path, monkeypatch) -> None:
     assert rc == 0
     record = json.loads((bundle / "checkpoint.json").read_text(encoding="utf-8"))
     assert record["epoch"] == 3
+
+
+def test_history_led_appends_one_line_per_epoch_across_resume(tmp_path,
+                                                              monkeypatch) -> None:
+    """The per-epoch LED (history.jsonl) is the liveness signal an operator
+    tails during a long run — best-only checkpoints go quiet for hours on a
+    healthy plateau. Resume must APPEND to it, never rewrite it."""
+    cases = _write_cases(tmp_path)
+    bundle = tmp_path / "bundle"
+    dices = iter([0.10, 0.20, 0.30, 0.40])
+    monkeypatch.setattr(
+        VanillaTrainer, "volume_selection_score",
+        lambda self, val_cases, preprocessing=None: next(dices),
+    )
+    fit_command(cases, "cpu", bundle, epochs=2, steps_per_epoch=1, seed=0)
+    lines = (bundle / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["epoch"] for line in lines] == [0, 1]
+    assert all("selection_score" in json.loads(line) for line in lines)
+
+    fit_command(cases, "cpu", bundle, epochs=4, steps_per_epoch=1, seed=0,
+                resume_from=bundle)
+    lines = (bundle / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["epoch"] for line in lines] == [0, 1, 2, 3]

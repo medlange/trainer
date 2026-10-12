@@ -549,6 +549,47 @@ arms, then a dosed full-parity arm — the three runs that convert "the
 dose was the gap" from analysis into numbers. Anisotropic strides and
 seeded nnU-Net follow.
 
+## W25-live + W29 (2026-10-12, ~14:00 MSK): the plateau scare, and the
+## per-epoch LED it bought
+
+Two hours into W25's afternoon both 1000-epoch runs went silent: no new
+best checkpoint (s0 last improved at epoch 136, selection 0.6475, 12:16;
+s1 at epoch 128, 0.6232, 12:01), fit logs showing only the repeating
+10-minute faulthandler watchdog dumps, main thread parked in train_step
+in every dump. From the outside that IS a stalled run — and the
+temptation was to kill both and restart with mitigations. The
+kill-confirmation probe said otherwise:
+
+- GPU util 100 % on both cards at 520-554 W of 575 W TDP, and — the
+  decisive number — GPU MEMORY util 46-50 %. A CPU-side sync spin or an
+  empty CUDA stream idles the memory controllers; half the memory
+  bandwidth saturated for two straight hours is a training loop feeding
+  and emptying real batches.
+- Whole-process CPU time grew ~54 s per 45 s wall (the prefetch
+  pipeline burning its cores), and the watchdog dumps' prefetch threads
+  sat in queue.put — a full queue, i.e. a consuming training thread.
+
+CONCLUSION: both runs healthy, in a SELECTION plateau — best-only
+checkpoints are silent by construction for exactly as long as the
+selector keeps not improving, which at poly-lr's still-high early
+learning rate is hours, not minutes. Killing them would have wasted
+6.5 h of training; the scare exposed an observability gap instead, and
+W29 closes it:
+
+W29 ships the per-epoch LED: `fit` now appends one json line per epoch
+(`epoch`, `loss`, the selection number, `lr`) to
+`out_dir/history.jsonl` — the liveness signal an operator can tail
+without a debugger. It is pure observability: no selection, no
+training, no rng consumption; a failed append is swallowed (a courtesy
+light must never take training down). The test caught one real edge on
+the way in: the FIRST epoch's LED write lands BEFORE any best
+checkpoint created the bundle directory, and an append into a missing
+directory raises FileNotFoundError — the silent-OSError handler ate
+exactly epoch 0's line, every run. Parent mkdir is now explicit.
+
+W25 itself is untouched by W29 (its lab tree is frozen; the running
+processes never re-read source). The W27 arms will pick the LED up.
+
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
 

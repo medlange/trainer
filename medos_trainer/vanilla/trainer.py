@@ -649,6 +649,27 @@ class VanillaTrainer:
                             "lr": self.optimizer.param_groups[0]["lr"],
                         }
                     history.append(record)
+                    # THE PER-EPOCH LED, pure observability: best-only
+                    # checkpoints go silent for hours during a selection
+                    # plateau on a healthy run, which from the outside is
+                    # indistinguishable from a stall without a debugger
+                    # (the W25 plateau scare: two healthy 1000-epoch runs
+                    # "looked dead" for two hours). One json line per epoch
+                    # is the liveness signal an operator can tail. A failed
+                    # append must never take training down — this is a
+                    # courtesy light, not a load-bearing write. The parent
+                    # mkdir is load-bearing too: the first epoch's LED lands
+                    # BEFORE any best checkpoint created the bundle dir, and
+                    # an append into a missing dir is an OSError the courtesy
+                    # light must not swallow silently-by-design.
+                    if out_dir is not None:
+                        try:
+                            led_path = Path(out_dir) / "history.jsonl"
+                            led_path.parent.mkdir(parents=True, exist_ok=True)
+                            with open(led_path, "a", encoding="utf-8") as led:
+                                led.write(json.dumps(record) + "\n")
+                        except OSError:
+                            pass
                     if score > best:
                         best = score
                         if out_dir is not None:
