@@ -199,16 +199,21 @@ class PlannedRun:
             # a W21 deadlock story too — mitigated by the scipy rewrite, but
             # the quality ablation is the reason it stays opt-in).
             augment_texture=False,
-            # DOSAGE PROFILE (W26): when a tier IS enabled, planned runs draw
-            # each transform at nnU-Net-class probabilities instead of the
-            # historical every-patch full dose — the fp250 ablation measured
-            # that the dose, not the transform family, was the 0.29 fg Dice
-            # difference (all-axes lowres at p=0.25 erases small lesions;
-            # nnU-Net's per-axis draw hits all three axes on ~1.6% of
-            # patches). Hand-written FitPlans keep augment_probs=None =
-            # full dose, byte-exact with every pre-W26 test and bundle.
-            augment_probs={"scale_prob": 0.2, "elastic_prob": 0.2,
-                           "noise_prob": 0.15, "blur_prob": 0.15,
+            # DOSAGE PROFILE (W26, corrected against the nnU-Net v2 source on
+            # 2026-10-12): the measured get_training_transforms defaults are
+            # SpatialTransform(p_rotation=0.2, p_scaling=0.2, scaling
+            # (0.7,1.4), p_elastic_deform=0 — ELASTIC IS OFF in their default
+            # trainer), GaussianNoise apply_probability=0.1, GaussianBlur 0.2
+            # (sigma 0.5-1.0), Brightness 0.15, Contrast 0.15,
+            # SimulateLowResolution 0.25 (scale 0.5-1.0, SYNCHRONIZED axes —
+            # the per-axis semantics W26 shipped is a deliberate milder
+            # deviation, pending the W27 arms), Gamma 0.1+0.1. The fp250
+            # collapse re-reads under these facts: our elastic ran on EVERY
+            # patch where theirs runs NONE — likely the bigger half of the
+            # -0.29. Hand-written FitPlans keep augment_probs=None = full
+            # dose, byte-exact with every pre-W26 test and bundle.
+            augment_probs={"scale_prob": 0.2, "elastic_prob": 0.0,
+                           "noise_prob": 0.1, "blur_prob": 0.2,
                            "lowres_prob": 0.25},
             # and a real plan PREFETCHES: the producer thread overlaps patch
             # sampling/augmentation with the GPU step (see prefetch.py) —

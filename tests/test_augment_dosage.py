@@ -106,7 +106,10 @@ def test_planned_run_carries_the_nnunet_class_dose() -> None:
     full dose that cost 0.29 fg Dice in fp250."""
     fp = collect_fingerprint(_toy_cases(3, seed=0))
     fit_plan = plan_from_fingerprint(fp, "cpu").fit_plan()
+    # The measured nnU-Net v2 get_training_transforms defaults (verified from
+    # the installed source 2026-10-12): scale 0.2, elastic 0.0 (OFF in their
+    # default trainer), noise 0.1, blur 0.2, low-res 0.25.
     assert fit_plan.augment_probs == {
-        "scale_prob": 0.2, "elastic_prob": 0.2,
-        "noise_prob": 0.15, "blur_prob": 0.15, "lowres_prob": 0.25,
+        "scale_prob": 0.2, "elastic_prob": 0.0,
+        "noise_prob": 0.1, "blur_prob": 0.2, "lowres_prob": 0.25,
     }

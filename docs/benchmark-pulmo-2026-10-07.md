@@ -500,7 +500,22 @@ fingerprint; seeded nnU-Net for a symmetric comparison.
 ## property now
 
 The mechanism analysis named dosage as the likely gap; W26 makes the
-nnU-Net-class dose expressible and ships it as the planned default:
+nnU-Net-class dose expressible and ships it as the planned default.
+CORRECTIONS VERIFIED AGAINST THE nnU-Net v2 SOURCE the same day
+(get_training_transforms of the trainer that produced the benchmark's
+reference numbers): SpatialTransform runs p_rotation=0.2, p_scaling=0.2
+(scaling 0.7-1.4) and **p_elastic_deform=0 — elastic deformation is OFF
+in their default trainer**; GaussianNoise apply_probability=0.1,
+GaussianBlur 0.2 (sigma 0.5-1.0), Brightness 0.15, Contrast 0.15,
+SimulateLowResolution 0.25 (scale 0.5-1.0, SYNCHRONIZED axes), Gamma
+0.1+0.1. Three consequences: (1) the fp250 collapse re-reads — our
+elastic ran on EVERY patch where theirs runs NONE, likely the bigger
+half of the -0.29; (2) the dose profile shipped as scale 0.2 / elastic
+0.0 / noise 0.1 / blur 0.2 / lowres 0.25; (3) the W26 per-axis low-res
+is a deliberate MILDer deviation from their synchronized default
+(pending the W27 arms), and their continuous-angle rotation (p=0.2) is
+a transform we do not have at all — noted as a parity gap, not shipped
+in this cycle.
 
 - `augment_scale_elastic` / `augment_texture` take per-transform draw
   gates (scale/elastic/noise/blur probabilities). Gates at >= 1.0
