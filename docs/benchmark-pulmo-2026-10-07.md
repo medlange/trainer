@@ -496,6 +496,40 @@ lowres, factor floor ~0.75) — converting "full parity hurts" into
 "tier X at dose Y hurts/helps"; anisotropic strides from the
 fingerprint; seeded nnU-Net for a symmetric comparison.
 
+## W26 (2026-10-12): dosage parity shipped — the dose is a plan
+## property now
+
+The mechanism analysis named dosage as the likely gap; W26 makes the
+nnU-Net-class dose expressible and ships it as the planned default:
+
+- `augment_scale_elastic` / `augment_texture` take per-transform draw
+  gates (scale/elastic/noise/blur probabilities). Gates at >= 1.0
+  short-circuit WITHOUT consuming an rng draw, so the full-dose default
+  replays the pre-W26 random stream bit-exactly — the toy-ball test that
+  caught the first implementation (one extra draw per gate shifted the
+  whole stream and dropped the trajectory below threshold) is the pin
+  that proved the short-circuit necessary.
+- The low-resolution simulation is PER-AXIS (nnU-Net
+  SimulateLowResolution semantics): each axis independently downsamples
+  with its own factor draw. The historical all-axes draw (25% of
+  patches at factor 0.5) halved a 40-voxel lesion to 20 and back —
+  the fp250 case_0009 collapse mechanism. Simultaneous three-axis
+  shrink now matches nnU-Net's ~1.6% of patches.
+- `FitPlan.augment_probs` carries the profile (key-subset and
+  range-validated), wired through the prefetch producer and the inline
+  loop identically via `_tier_kwargs`. Planned runs set the nnU-Net-
+  class dose (scale/elastic 0.2, noise/blur 0.15, lowres per-axis
+  0.25); the tiers stay opt-in (W24), so the dose activates with them.
+- Five new tests pin: closed-gate bit-exact identity, open-gate
+  activity, per-axis low-res shape preservation, plan validation, and
+  the dose-class promise of a planned run.
+
+262 tests green, ruff clean. THE REMAINING VERIFICATION IS GPU-BOUND
+and queues behind W25: elastic-only and texture-only decomposition
+arms, then a dosed full-parity arm — the three runs that convert "the
+dose was the gap" from analysis into numbers. Anisotropic strides and
+seeded nnU-Net follow.
+
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
 
