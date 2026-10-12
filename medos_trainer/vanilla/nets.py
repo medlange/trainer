@@ -46,6 +46,12 @@ class UNetConfig:
     `features` is per stage: len(features) encoder stages, the decoder mirrors
     it in reverse. `stem_stride` is the plan's answer to anisotropy/resolution
     (e.g. (1, 1, 1) for full-resolution CT, (2, 2, 1) for thick-slice data).
+    `downsample_strides` is the nnU-Net-class refinement (W28): one (d, h, w)
+    stride tuple per downsampling, letting the planner stop pooling an axis
+    whose pooled patch would drop under 8 voxels — nnU-Net's own rule, which
+    is what produces their [2, 2, 2] x N + [2, 1, 2] tables on anisotropic
+    data. None keeps the historical uniform stride-2 between stages, which
+    is what every pre-existing net and bundle was built with.
     `deep_supervision` is a TRAINING property: the served artifact must be
     built with it off (one output tensor, input resolution). `residual`
     swaps the encoder/bottleneck `_ConvBlock`s for `_ResBlock`s (the decoder
@@ -57,6 +63,7 @@ class UNetConfig:
     num_classes: int
     features: tuple[int, ...] = (32, 64, 128, 256, 320)
     stem_stride: tuple[int, int, int] = (1, 1, 1)
+    downsample_strides: tuple[tuple[int, int, int], ...] | None = None
     deep_supervision: bool = True
     residual: bool = False
 
@@ -65,8 +72,32 @@ class UNetConfig:
             raise ValueError("a UNet needs at least two stages")
         if any(f <= 0 for f in self.features):
             raise ValueError(f"feature widths must be positive, got {self.features}")
+        # NORMALISE TO TUPLES: a bundle rebuilt from net_config.json hands
+        # these in as JSON arrays, and while Conv3d tolerates a list stride,
+        # nn.Upsample's trilinear path refuses one (float() of a list) — the
+        # config is the seam where that difference must disappear.
+        object.__setattr__(
+            self, "stem_stride", tuple(int(s) for s in self.stem_stride)
+        )
         if any(s not in (1, 2) for s in self.stem_stride):
             raise ValueError(f"stem strides are 1 or 2 per axis, got {self.stem_stride}")
+        if self.downsample_strides is not None:
+            if len(self.downsample_strides) != len(self.features) - 1:
+                raise ValueError(
+                    "one downsample stride tuple per downsampling "
+                    f"({len(self.features) - 1} for {len(self.features)} "
+                    f"stages), got {len(self.downsample_strides)}"
+                )
+            normalised = tuple(
+                tuple(int(s) for s in stride) for stride in self.downsample_strides
+            )
+            object.__setattr__(self, "downsample_strides", normalised)
+            for stride in normalised:
+                if len(stride) != 3 or any(s not in (1, 2) for s in stride):
+                    raise ValueError(
+                        "downsample strides are 1 or 2 per axis, got "
+                        f"{self.downsample_strides}"
+                    )
 
 
 class _ConvBlock(nn.Sequential):
@@ -160,29 +191,38 @@ class VanillaUNet(nn.Module):
             nn.LeakyReLU(0.01, inplace=True),
         )
 
-        # ENCODER: one block per stage; a stride-2 conv halves resolution
-        # between stages. There is one fewer downsampling than stages, so the
-        # deepest block's output IS the bottleneck. `residual` swaps the
-        # ConvBlocks for _ResBlocks HERE ONLY (encoder + bottleneck) — the
-        # decoder keeps _ConvBlock, nnU-Net's resenc scoping.
+        # ENCODER: one block per stage; a strided conv halves resolution
+        # between stages (the plan may make that stride per-axis — W28's
+        # downsample_strides; None is the historical uniform 2). There is
+        # one fewer downsampling than stages, so the deepest block's output
+        # IS the bottleneck. `residual` swaps the ConvBlocks for _ResBlocks
+        # HERE ONLY (encoder + bottleneck) — the decoder keeps _ConvBlock,
+        # nnU-Net's resenc scoping.
         stage = _ResBlock if config.residual else _ConvBlock
+        strides = config.downsample_strides or tuple(
+            (2, 2, 2) for _ in range(len(feats) - 1)
+        )
         self.encoders = nn.ModuleList()
         self.downsamples = nn.ModuleList()
         prev = feats[0]
-        for width in feats[1:]:
+        for width, stride in zip(feats[1:], strides):
             self.encoders.append(stage(prev, width))
-            self.downsamples.append(nn.Conv3d(width, width, kernel_size=3, stride=2, padding=1))
+            self.downsamples.append(
+                nn.Conv3d(width, width, kernel_size=3, stride=stride, padding=1)
+            )
             prev = width
 
-        # DECODER mirrors the encoder: trilinear upsample + 1x1x1 channel
-        # reduction, concat the matching skip, ConvBlock.
+        # DECODER mirrors the encoder: trilinear upsample by the matching
+        # encoder's stride (per-axis under W28) + 1x1x1 channel reduction,
+        # concat the matching skip, ConvBlock.
         self.upsamples = nn.ModuleList()
         self.joins = nn.ModuleList()
         self.decoders = nn.ModuleList()
         rev = list(reversed(feats))
-        for hi, lo in zip(rev, rev[1:]):
+        rev_strides = list(reversed(strides))
+        for hi, lo, stride in zip(rev, rev[1:], rev_strides):
             self.upsamples.append(
-                nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
+                nn.Upsample(scale_factor=stride, mode="trilinear", align_corners=False)
             )
             self.joins.append(nn.Conv3d(hi, lo, kernel_size=1))
             # After the concat the tensor carries skip (hi) + joined (lo)

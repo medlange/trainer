@@ -146,6 +146,9 @@ class PlannedRun:
     preset: VramPreset
     patch_size: tuple[int, int, int]
     stem_stride: tuple[int, int, int]
+    # W28: per-stage downsampling strides (nnU-Net's min-pooled-size rule).
+    # None = the historical uniform stride-2 between stages.
+    downsample_strides: tuple[tuple[int, int, int], ...] | None = None
     steps_per_epoch: int = 250
     epochs: int = 1000
     learning_rate: float = 0.01
@@ -166,6 +169,7 @@ class PlannedRun:
             num_classes=self.fingerprint.num_classes,
             features=self.preset.features,
             stem_stride=self.stem_stride,
+            downsample_strides=self.downsample_strides,
             deep_supervision=True,
             residual=True,
         )
@@ -399,22 +403,50 @@ def plan_from_fingerprint(
             f"voxel count {int(voxel_count)} exceeds preset {p.name}'s budget "
             f"{p.voxel_budget}; shrunk by {factor:.3f}^3",
         )
-    # THE PATCH MUST BE A MULTIPLE OF THE NET'S TOTAL POOLING STRIDE —
-    # 2^(stages-1): a 6-stage net pools 32x, and a patch rounded only to 16
-    # rags the bottleneck. Five stages (the historical presets) pool 16x,
-    # which is why the constant was hard-coded until the xlarge preset.
-    stride = 2 ** (len(p.features) - 1)
-    patch = tuple(_round_to_stride(v, stride) for v in voxel_patch)
-
-    # STEM STRIDE from anisotropy: through-plane spacing twice the in-plane
-    # means the K axis carries half the information per voxel; the stem
-    # spends one factor-2 there. In-plane strides stay 1 — organ shape
-    # lives in-plane.
+    # THE PATCH MUST BE A MULTIPLE OF THE NET'S TOTAL POOLING STRIDE, now
+    # PER AXIS (W28): with anisotropic downsampling the total is
+    # stem_stride[i] * prod(downsample strides)[i], not the historical
+    # uniform 2^(stages-1). A patch rounded only to 16 rags a 32x-pooled
+    # bottleneck; a patch rounded to 32 rags an axis the plan stopped
+    # pooling at 16x just as hard.
     in_plane = (spacing[1] + spacing[2]) / 2.0
     stem = (2, 1, 1) if spacing[0] >= 2.0 * in_plane else (1, 1, 1)
     reasons.append(
         f"through-plane spacing {spacing[0]:.2f} vs in-plane {in_plane:.2f} mm "
         f"-> stem_stride {stem}",
+    )
+
+    # DOWNSAMPLE STRIDES BY THE nnU-Net MIN-POOLED-SIZE RULE (W28): an axis
+    # is pooled (stride 2) only while its pooled patch size stays >= 8
+    # voxels — `voxel_patch[i] / current_stride_product >= 8`. This is the
+    # exact rule behind nnU-Net's tables (their Dataset502 plans carry
+    # [2,2,2]x4 + [2,1,2]: the 96-voxel axis stops at 16x because
+    # 96/16 = 6 < 8). Uniform (2,2,2) everywhere keeps the historical net
+    # shape and is reported as None — no churn for isotropic data.
+    n_down = len(p.features) - 1
+    products = [float(stem[i]) for i in range(3)]
+    downs: list[tuple[int, int, int]] = []
+    for _ in range(n_down):
+        step = []
+        for i in range(3):
+            if voxel_patch[i] / products[i] >= 8.0:
+                step.append(2)
+                products[i] *= 2.0
+            else:
+                step.append(1)
+        downs.append(tuple(step))
+    downsample_strides = (
+        None if all(d == (2, 2, 2) for d in downs) else tuple(downs)
+    )
+    if downsample_strides is not None:
+        reasons.append(
+            f"pooled patch would drop under 8 voxels "
+            f"(nnU-Net min-pooled-size rule) -> per-stage downsample strides "
+            f"{downsample_strides} (totals {tuple(int(x) for x in products)})",
+        )
+    patch = tuple(
+        _round_to_stride(v, max(1, int(products[i])))
+        for i, v in enumerate(voxel_patch)
     )
 
     # PREPROCESSING, the second half of what the plan decides (the
@@ -435,5 +467,6 @@ def plan_from_fingerprint(
         preset=p,
         patch_size=patch,
         stem_stride=stem,
+        downsample_strides=downsample_strides,
         reasons=tuple(reasons),
     )

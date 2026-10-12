@@ -68,9 +68,12 @@ def test_fingerprint_refuses_empty_corpus_and_unlabelled() -> None:
 def test_plan_isotropic_spacing_full_stem() -> None:
     fp = collect_fingerprint(_cases(spacing=(1.0, 1.0, 1.0)))
     plan = plan_from_fingerprint(fp, "cpu")
-    # 12/1=12 -> 16, 20/1=20 -> 16: rounded to the stride multiple.
-    assert all(p % 16 == 0 for p in plan.patch_size)
-    assert plan.patch_size[0] == 16
+    # W28: the min-pooled-size rule stops pooling each axis once its
+    # pooled patch would drop under 8 (12-voxel axis pools once to 2,
+    # 20-voxel axes reach 4), and the patch rounds to THOSE per-axis
+    # totals — axis0 stays at the historical 16 floor.
+    assert plan.downsample_strides == ((2, 2, 2), (1, 2, 2), (1, 1, 1))
+    assert plan.patch_size == (16, 20, 20)
     assert plan.stem_stride == (1, 1, 1)
     assert plan.preset.name == "cpu"
     assert plan.reasons, "the plan must record why"
@@ -80,8 +83,10 @@ def test_plan_anisotropic_spacing_stems_the_through_plane_axis() -> None:
     fp = collect_fingerprint(_cases(spacing=(3.0, 1.0, 1.0)))
     plan = plan_from_fingerprint(fp, "cpu")
     assert plan.stem_stride == (2, 1, 1)
-    # 12/3 = 4 -> 16 after the floor; in-plane 20 -> 16.
-    assert plan.patch_size == (16, 16, 16)
+    # 12/3 = 4 -> the 16 floor; in-plane 20 rounds to their W28 totals
+    # (the stem already spent axis0's factor 2, so the axis never pools
+    # again: 4/2 = 2 < 8).
+    assert plan.patch_size == (16, 20, 20)
     assert any("stem_stride (2, 1, 1)" in r for r in plan.reasons)
 
 

@@ -612,6 +612,41 @@ nnU-Net side its mean/spread for the final parity table. Draws are
 scripted bench-side (`~/mlg-bench/run_nn250_draw.sh N GPU` —
 train/predict/import/eval, per-draw eval json), queued behind W27.
 
+## W28 (2026-10-12, night): anisotropic downsampling strides, the
+## nnU-Net min-pooled-size rule
+
+The last named architecture gap. nnU-Net's Dataset502 plans carry
+strides [2,2,2]x4 + [2,1,2] on a 6-stage net; we pooled a uniform 2x on
+every axis at every stage. Their table is not a hand-tune — it falls
+out of one rule: an axis is pooled only while its pooled patch stays
+>= 8 voxels (their 96-voxel axis stops at 16x because 96/16 = 6 < 8).
+W28 implements exactly that rule:
+
+- `UNetConfig.downsample_strides` — one (d, h, w) tuple per
+  downsampling; None keeps the historical uniform stride-2 net
+  byte-identical (every pre-existing bundle still loads and builds).
+  The config normalises JSON-array inputs back to tuples — a bundle
+  rebuilt from net_config.json hands lists in, and while Conv3d
+  tolerates a list stride, nn.Upsample's trilinear path refuses one.
+- The planner computes the table from the capped voxel patch, rounds
+  the patch PER AXIS to its actual total (stem x downsamples), and
+  records the rule in `reasons`. Uniform (2,2,2) everywhere is
+  reported as None — no churn for data that pools all the way down.
+- On the real benchmark data (xlarge, spacing (0.782, 0.782, 1.0)) the
+  rule emits ((2,2,2)x4, (1,2,2)) with totals (16, 32, 32) — our axis0
+  is nnU-Net's short axis, so their [2,1,2] read in our axis order.
+  THE PLANNED PATCH IS UNCHANGED (96, 192, 128): the W28 GPU arm is
+  perfectly ceteris-paribus against W25's recipe — same patch, same
+  parameter count, only the stride table differs.
+- Six new tests pin: uniform default byte-identity, table validation,
+  forward restoring the input grid in both supervision modes, the
+  bundle-json round-trip, the planner reproducing the benchmark table,
+  and the uniform-None path.
+
+271 tests green, ruff clean. GPU validation queues behind W27: one
+250-epoch xlarge arm with the recipe flags, ceteris paribus against
+the W25/W27 row it mutates.
+
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
 
