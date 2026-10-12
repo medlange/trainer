@@ -355,6 +355,17 @@ the engineering sense the word was used: same class, per-case parity
 on the hard small-lesion case, remaining gap concentrated in the two
 large-lesion cases (0013, 0015) where both frameworks agree most.
 
+PARAMETER ACCOUNTING (2026-10-12, counted exactly — PlainConvUNet
+instantiated from the run's own plans.json): nnU-Net's ACTUAL network
+on this corpus is 6-stage [32,64,128,256,320,320] with strides
+ending [2,1,2], 30.79M parameters, no deep supervision (v2). Medlange
+large (5-stage, residual encoder, DS heads): 21.75M — SMALLER than
+nnU-Net's net, scores 0.626. Medlange xlarge (6-stage, same feature
+plan, residual, DS): 38.45M — +25% over nnU-Net's actual net, scores
+0.723. So the honest capacity framing: at −30% parameters we are
+within 0.156 of nnU-Net; at +25% parameters, within 0.059. Neither
+point is strict parameter parity, and the final verdict says so.
+
 THE FULL-PARITY ABLATION, COMPLETE: fp250 finished clean (rc=0) at 20:37
 with a final deployment fg Dice of **0.4352** (best epoch 79 by selection,
 0.4804; selector slightly optimistic in absolute terms on this run, ranking
