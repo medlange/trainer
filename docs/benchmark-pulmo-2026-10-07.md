@@ -590,6 +590,28 @@ exactly epoch 0's line, every run. Parent mkdir is now explicit.
 W25 itself is untouched by W29 (its lab tree is frozen; the running
 processes never re-read source). The W27 arms will pick the LED up.
 
+## W29b (2026-10-12, evening): nnU-Net is NOT seed-frozen — the seeding
+## question resolved by source inspection
+
+The campaign plan assumed nnU-Net's numbers are single seeded runs and
+listed "seed nnU-Net (via patch, documented)" as a pending arm. SOURCE
+INSPECTION of the installed v2.8.1 on the benchmark box falsified the
+premise: `nnUNetTrainer` never calls `torch.manual_seed` (weight init
+draws from OS entropy), the training augmenter is the
+`NonDetMultiThreadedAugmenter` constructed with `seeds=None` (worker
+seeds drawn from entropy every run), and the only pinned seed anywhere
+is the CROSS-VALIDATION SPLIT's 12345 (`generate_crossval_split`,
+fold split 12345+fold). Every `nnUNetv2_train` invocation is ALREADY an
+independent statistical draw — same statistical structure as our
+fresh-from-seed honesty.
+
+CONSEQUENCE, cheaper and cleaner than a patch: two additional draws of
+the reference recipe (Dataset502 crop, 3d_fullres, fold 0,
+nnUNetTrainer_250epochs) into FRESH `nnUNet_results` dirs give the
+nnU-Net side its mean/spread for the final parity table. Draws are
+scripted bench-side (`~/mlg-bench/run_nn250_draw.sh N GPU` —
+train/predict/import/eval, per-draw eval json), queued behind W27.
+
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
 
