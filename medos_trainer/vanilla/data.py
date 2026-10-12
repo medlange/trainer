@@ -211,8 +211,11 @@ def augment_scale_elastic(
     elastic_grid: tuple[int, int, int] = (4, 4, 4),
     scale_prob: float = 1.0,
     elastic_prob: float = 1.0,
+    rotation_prob: float = 0.0,
+    rotation_deg: float = 30.0,
 ) -> Patch:
-    """Random per-axis zoom, then a smooth elastic warp — patch-shaped output.
+    """Continuous rotation, then random per-axis zoom, then a smooth elastic
+    warp — patch-shaped output.
 
     WHY THIS EXISTS: mirroring and rotation teach the net invariance to pose,
     but real imaging varies in SCALE and in soft DEFORMATION. Both are
@@ -221,7 +224,11 @@ def augment_scale_elastic(
     rule: zooming out pads by REFLECTING the patch's own border, and the
     elastic warp clamps lookups to the nearest real voxel (`padding_mode=
     "border"`). Nothing the transform writes came from anywhere but the
-    patch itself.
+    patch itself. CONTINUOUS ROTATION (W26b) closes the last named parity
+    gap to nnU-Net's SpatialTransform: rot90/mirror only reach multiples of
+    90 degrees, their default recipe rotates continuously at p=0.2 (±30
+    degrees per axis class), and the rotation composes with scale and
+    elastic as three independent per-patch draws — exactly their wrapper.
 
     THE IMPLEMENTATION IS TORCH-NATIVE, and that is a measured fix, not a
     preference: the previous scipy build (per-axis full-resolution
@@ -245,17 +252,31 @@ def augment_scale_elastic(
     `patch.spacing_mm`, so the same number means the same deformation on
     0.5 mm CT and 3 mm thick-slice data.
 
-    DOSAGE (W26): `scale_prob` and `elastic_prob` are PER-PATCH draw gates —
-    nnU-Net applies each geometric transform with p~0.2, where this tier's
-    original build applied BOTH to EVERY patch. The fp250 ablation measured
-    that full-dose parity costs 0.29 fg Dice on a 16-case corpus, so the
-    dose is the variable, not the transform family. Probabilities default to
-    1.0 = the historical full-dose behavior every existing test pins; a
-    planned run can carry the nnU-Net-class profile through FitPlan.
+    DOSAGE (W26): `scale_prob`, `elastic_prob` and `rotation_prob` are
+    PER-PATCH draw gates — nnU-Net applies each geometric transform with
+    p~0.2 (elastic OFF by default, verified from their source 2026-10-12),
+    where this tier's original build applied scale+elastic to EVERY patch.
+    The fp250 ablation measured that full-dose parity costs 0.29 fg Dice on
+    a 16-case corpus, so the dose is the variable, not the transform family.
+    All probabilities default so the historical behavior every existing test
+    pins is byte-exact (rotation defaults OFF — it did not exist pre-W26b).
     """
 
     image, label, mask = patch.image, patch.label, patch.mask
     shape = tuple(int(v) for v in image.shape[1:])
+
+    # CONTINUOUS ROTATION first — their SpatialTransform order (rotate, then
+    # scale, then elastic). Gate at 0.0 short-circuits without an rng draw,
+    # keeping pre-W26b streams untouched.
+    if rotation_prob > 0.0 and rng.random() < rotation_prob:
+        angles = tuple(float(rng.uniform(-rotation_deg, rotation_deg))
+                       for _ in range(3))
+        if any(a != 0.0 for a in angles):
+            field = _rotation_field(shape, angles)
+            image = _warp(image, field, bilinear=True)
+            label = _warp(label, field, bilinear=False).astype(label.dtype, copy=False)
+            if mask is not None:
+                mask = _warp(mask, field, bilinear=False)
 
     # Gates short-circuit at prob >= 1.0 WITHOUT consuming an rng draw: the
     # full-dose default then replays the pre-W26 random stream bit-exactly
@@ -361,6 +382,36 @@ def _elastic_field(
     for axis, n in enumerate(shape):
         samples[..., axis] = samples[..., axis] / max(n - 1, 1) * 2.0 - 1.0
     return samples
+
+
+def _rotation_field(
+    shape: tuple[int, int, int],
+    angles_deg: tuple[float, float, float],
+) -> torch.Tensor:
+    """(K, J, I, 3) normalized grid rotating the volume about its center.
+
+    Composes Rx(θx)Ry(θy)Rz(θz) in voxel space; the volume center is the
+    origin of the normalized grid (align_corners=False puts pixel (n-1)/2 at
+    0), so rotation about the center is a plain matrix product. Border
+    semantics come from _warp's padding_mode="border" — out-of-range lookups
+    clamp to the nearest real voxel, the same contract as the elastic warp.
+    """
+    import torch
+
+    theta = [np.deg2rad(a) for a in angles_deg]
+    cx, sx = np.cos(theta[0]), np.sin(theta[0])
+    cy, sy = np.cos(theta[1]), np.sin(theta[1])
+    cz, sz = np.cos(theta[2]), np.sin(theta[2])
+    rx = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]])
+    ry = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]])
+    rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
+    rot = rz @ ry @ rx  # apply x, then y, then z
+    axes = [torch.arange(n, dtype=torch.float32) for n in shape]
+    lattice = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1)
+    for axis, n in enumerate(shape):
+        lattice[..., axis] = lattice[..., axis] / max(n - 1, 1) * 2.0 - 1.0
+    samples = lattice.numpy() @ rot.T
+    return torch.from_numpy(np.ascontiguousarray(samples.astype(np.float32)))
 
 
 def _warp(array: np.ndarray, grid: torch.Tensor, *, bilinear: bool) -> np.ndarray:

@@ -213,6 +213,7 @@ class PlannedRun:
             # -0.29. Hand-written FitPlans keep augment_probs=None = full
             # dose, byte-exact with every pre-W26 test and bundle.
             augment_probs={"scale_prob": 0.2, "elastic_prob": 0.0,
+                           "rotation_prob": 0.2, "rotation_deg": 30.0,
                            "noise_prob": 0.1, "blur_prob": 0.2,
                            "lowres_prob": 0.25},
             # and a real plan PREFETCHES: the producer thread overlaps patch

@@ -50,10 +50,35 @@ def test_closed_gates_are_bit_exact_identity() -> None:
     assert out.label is patch.label and out.mask is patch.mask
     out = augment_scale_elastic(
         patch, np.random.default_rng(2),
-        scale_prob=0.0, elastic_prob=0.0,
+        scale_prob=0.0, elastic_prob=0.0, rotation_prob=0.0,
     )
     assert np.array_equal(out.image, patch.image)
     assert np.array_equal(out.label, patch.label)
+
+
+def test_rotation_zero_angle_is_identity() -> None:
+    """A rotation draw with both gates open but a zero angle range composes
+    to the identity rotation: grid_sample at the exact lattice points is
+    bit-exact, so the gate machinery is what the activity test exercises,
+    not interpolation noise."""
+    patch = _patch()
+    out = augment_scale_elastic(
+        patch, np.random.default_rng(6),
+        scale_prob=0.0, elastic_prob=0.0,
+        rotation_prob=1.0, rotation_deg=0.0,
+    )
+    assert np.array_equal(out.image, patch.image)
+
+
+def test_rotation_changes_the_image() -> None:
+    patch = _patch()
+    out = augment_scale_elastic(
+        patch, np.random.default_rng(7),
+        scale_prob=0.0, elastic_prob=0.0,
+        rotation_prob=1.0, rotation_deg=20.0,
+    )
+    assert out.image.shape == patch.image.shape
+    assert not np.array_equal(out.image, patch.image)
 
 
 def test_open_gates_change_the_image() -> None:
@@ -108,8 +133,10 @@ def test_planned_run_carries_the_nnunet_class_dose() -> None:
     fit_plan = plan_from_fingerprint(fp, "cpu").fit_plan()
     # The measured nnU-Net v2 get_training_transforms defaults (verified from
     # the installed source 2026-10-12): scale 0.2, elastic 0.0 (OFF in their
-    # default trainer), noise 0.1, blur 0.2, low-res 0.25.
+    # default trainer), rotation 0.2 (±30 degrees class), noise 0.1,
+    # blur 0.2, low-res 0.25.
     assert fit_plan.augment_probs == {
         "scale_prob": 0.2, "elastic_prob": 0.0,
+        "rotation_prob": 0.2, "rotation_deg": 30.0,
         "noise_prob": 0.1, "blur_prob": 0.2, "lowres_prob": 0.25,
     }

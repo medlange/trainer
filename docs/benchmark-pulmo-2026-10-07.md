@@ -513,9 +513,13 @@ elastic ran on EVERY patch where theirs runs NONE, likely the bigger
 half of the -0.29; (2) the dose profile shipped as scale 0.2 / elastic
 0.0 / noise 0.1 / blur 0.2 / lowres 0.25; (3) the W26 per-axis low-res
 is a deliberate MILDer deviation from their synchronized default
-(pending the W27 arms), and their continuous-angle rotation (p=0.2) is
-a transform we do not have at all — noted as a parity gap, not shipped
-in this cycle.
+(pending the W27 arms). W26b (same day) CLOSED the last named gap:
+continuous rotation — the geometric tier now composes rotation, scale
+and elastic as independent per-patch draws, the exact structure of
+their SpatialTransform, with rotation_prob 0.2 / ±30 degrees in the
+planned profile. THE W27 decomposition arms therefore test nnU-Net's
+recipe BY CONSTRUCTION: --augment-resample is their SpatialTransform
+twin, --augment-texture their noise/blur/low-res bundle.
 
 - `augment_scale_elastic` / `augment_texture` take per-transform draw
   gates (scale/elastic/noise/blur probabilities). Gates at >= 1.0

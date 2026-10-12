@@ -174,7 +174,8 @@ class FitPlan:
                 f"{self.prefetch_threads}"
             )
         if self.augment_probs is not None:
-            allowed = ("scale_prob", "elastic_prob", "noise_prob",
+            allowed = ("scale_prob", "elastic_prob", "rotation_prob",
+                       "rotation_deg", "noise_prob",
                        "blur_prob", "lowres_prob")
             unknown = set(self.augment_probs) - set(allowed)
             if unknown:
@@ -183,10 +184,11 @@ class FitPlan:
                     f"got unknown: {sorted(unknown)}"
                 )
             for key, value in self.augment_probs.items():
-                if not 0.0 <= float(value) <= 1.0:
+                ceiling = 180.0 if key == "rotation_deg" else 1.0
+                if not 0.0 <= float(value) <= ceiling:
                     raise ValueError(
-                        f"augment_probs[{key!r}] is a probability in [0, 1], "
-                        f"got {value!r}"
+                        f"augment_probs[{key!r}] is out of range "
+                        f"[0, {ceiling}], got {value!r}"
                     )
         if self.selection not in ("patch_dice", "volume_dice"):
             raise ValueError(
@@ -246,7 +248,9 @@ def _batch_factory(
     tiers.
     """
     sampler = PatchSampler(plan.patch_size, foreground_prob=plan.foreground_prob)
-    geo_kwargs = _tier_kwargs(plan, ("scale_prob", "elastic_prob"))
+    geo_kwargs = _tier_kwargs(
+        plan, ("scale_prob", "elastic_prob", "rotation_prob", "rotation_deg")
+    )
     tex_kwargs = _tier_kwargs(plan, ("noise_prob", "blur_prob", "lowres_prob"))
     while True:
         patches = [
@@ -559,8 +563,12 @@ class VanillaTrainer:
         # computes in _batch_factory; both sites must see identical kwargs
         # (the two draw the same tiers in the same order; see the producer
         # docstring).
-        geo_kwargs = _tier_kwargs(self.plan, ("scale_prob", "elastic_prob"))
-        tex_kwargs = _tier_kwargs(self.plan, ("noise_prob", "blur_prob", "lowres_prob"))
+        geo_kwargs = _tier_kwargs(
+            self.plan, ("scale_prob", "elastic_prob", "rotation_prob", "rotation_deg")
+        )
+        tex_kwargs = _tier_kwargs(
+            self.plan, ("noise_prob", "blur_prob", "lowres_prob")
+        )
         try:
             for epoch in range(start_epoch, self.plan.epochs):
                 losses = []
