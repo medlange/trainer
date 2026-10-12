@@ -154,11 +154,14 @@ plan:
 - `--amp` runs the forward under autocast with a GradScaler on CUDA
   devices. On CPU it is ignored: there is nothing to accelerate and the
   CPU arithmetic stays exactly what it always was.
-- `--no-augment-resample` turns off the scale/elastic augmentation tier
-  (on by default for real plans). Mirror/rotate augmentation is always on;
-  it cannot invent anatomy, and neither can the resampling tier — zoom-out
-  pads by reflecting the patch's own border, and the elastic warp clamps
-  out-of-range lookups to the nearest real voxel.
+- `--augment-resample` turns ON the scale/elastic augmentation tier
+  (OFF by default for real plans since W24 — the fp250 ablation measured
+  the full nnU-Net-parity set 0.19-0.29 fg Dice worse than intensity-only
+  on a 16-case corpus; see docs/benchmark-pulmo-2026-10-07.md). Mirror/
+  rotate augmentation is always on; it cannot invent anatomy, and neither
+  can the resampling tier — zoom-out pads by reflecting the patch's own
+  border, and the elastic warp clamps out-of-range lookups to the nearest
+  real voxel.
 - `--max-val-cases N` caps the post-fit evaluation over the validation
   split (default 8; the evaluation also appears in the command's JSON
   summary under `evaluation`).
@@ -243,21 +246,25 @@ pass each case's own spacing automatically; library callers spell it
 before preprocessing existed carry no `preprocess.json` and load as
 identity: old bundles keep predicting exactly as they always did.
 
-AUGMENTATION, the family a fit applies on top of those pixels — now the
-full nnU-Net-parity set, in three families applied in order: GEOMETRIC —
-mirror along any axis and 90-degree in-plane rotation (always on — they
-cannot invent anatomy), plus a random zoom and a smooth elastic warp behind
-`augment_resample` (on for planned runs, `--no-augment-resample` opts out);
-INTENSITY — random brightness shift, contrast scaling and gamma
-(`augment_intensity`, the tier the PulmoAI benchmark named as a gap:
-nnU-Net augments intensity, a geometry-only stack memorizes one intensity
-regime and loses foreground Dice on low-contrast data); and TEXTURE —
-gaussian noise, gaussian blur and low-resolution simulation
-(`augment_texture`), the last missing three of nnU-Net's ~10-transform
-family. Intensity and texture are applied to the image alone after the
-geometric tiers — they change how the anatomy looks, never where it is, so
-label and mask ride along untouched. Hand-written `FitPlan`s default all
-three flags off and keep byte-exact dynamics; planned runs turn all on.
+AUGMENTATION, the family a fit applies on top of those pixels — three
+families applied in order, of which a real plan runs INTENSITY-ONLY by
+default (W24): GEOMETRIC — mirror along any axis and 90-degree in-plane
+rotation (always on — they cannot invent anatomy), plus a random zoom and
+a smooth elastic warp behind `augment_resample` (OPT-IN since W24:
+`--augment-resample`; the fp250 ablation measured the full set 0.19-0.29
+fg Dice WORSE than intensity-only on a 16-case corpus — enable it for
+large corpora where elastic's small-structure robustness earns its
+distortion); INTENSITY — random brightness shift, contrast scaling and
+gamma (`augment_intensity`, the tier the PulmoAI benchmark consistently
+credited, on by default); and TEXTURE — gaussian noise, gaussian blur and
+low-resolution simulation (`augment_texture`, OPT-IN since W24 via
+`--augment-texture`; its gaussian blur also had a W21 deadlock story,
+mitigated by the scipy rewrite — see the benchmark report). Intensity and
+texture are applied to the image alone after the geometric tiers — they
+change how the anatomy looks, never where it is, so label and mask ride
+along untouched. Hand-written `FitPlan`s default all three flags off and
+keep byte-exact dynamics; planned runs turn intensity on and the other
+two off.
 
 ### Cross-validation, and what a fold is
 
