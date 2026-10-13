@@ -676,6 +676,18 @@ launched immediately (11:44) alongside seed 1 — no idle-GPU hours.
 The dfp250 bundle's `history.jsonl` is live (3 epochs at first check):
 W29's LED proves itself on the first real run.
 
+INCIDENT (2026-10-13, 13:45): dfp250 segfaulted MID-RUN (rc=139) at
+~epoch 51 — the exit-segfault class, but not at exit this time. The
+run script's eval then scored the half-trained best checkpoint
+(0.5202, case_0009 0.003); that json is preserved as
+`ml-dfp250-eval-ep51-crash.json` and is NOT an arm result. THE DESIGNED
+ANSWER WORKED: `--resume-from` the same bundle relaunched at 13:46
+(tmux `dfp250r`) — history.jsonl appended epochs 52+ seamlessly, the
+poly lr continued from the run progress (0.0080 at epoch 54, not a
+restart), the run-wide best is preserved by construction. The arm's
+canonical result remains whatever the resumed run's final eval writes
+to `ml-dfp250-eval.json`.
+
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
 
