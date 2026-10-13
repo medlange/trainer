@@ -709,6 +709,31 @@ individually touches nnU-Net's 5-epoch arm (0.7161) but not the
 OPERATIONAL: GPU1 freed by seed 1 took the el250 arm at 17:06
 (supervised_fit.sh — resume-on-crash armed).
 
+## W27-first (2026-10-13, ~20:40 MSK): dfp250 in — the dose does NOT
+## jump the mean on the first draw
+
+The resumed dfp250 arm completed all 250 epochs cleanly (rc=0, LED
+253 lines, poly lr closed at 4.8e-7):
+
+| case | fg Dice |
+|---|---|
+| case_0009 | 0.481 |
+| case_0011 | 0.741 |
+| case_0013 | 0.551 |
+| case_0015 | 0.806 |
+| **mean** | **0.6450** |
+
+Against the same-seed pre-W26 xlarge arm (ml-xlg250: 0.7230) and the
+250-epoch seed band (0.637–0.723) this draw sits INSIDE the noise, not
+above it — the nnU-Net-class dose on both tiers did not lift the first
+seed. The honest reading: either the dose is not the binding
+constraint, or single-seed variance (±0.04) hides a real but small
+effect. THE DECOMPOSITION ARMS NOW DECIDE: el250 (paused by the user
+at epoch 80, resumable from the bundle) and tex250 isolate which tier
+carries what. Queue paused while the user's GPU work runs; the verdict
+table gains its nnU-Net spread from two scripted draws when slots
+free up.
+
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
 
