@@ -688,6 +688,27 @@ restart), the run-wide best is preserved by construction. The arm's
 canonical result remains whatever the resumed run's final eval writes
 to `ml-dfp250-eval.json`.
 
+## W25-FINAL (2026-10-13, ~17:00 MSK): both 1000-epoch seeds in —
+## the budget hypothesis is REFUTED
+
+| seed | fg Dice | cases |
+|---|---|---|
+| 0 | 0.6638 | 0.629 / 0.692 / 0.440 / 0.894 |
+| 1 | **0.7226** | 0.668 / 0.643 / 0.700 / 0.879 |
+| mean | 0.6932 ± 0.029 | |
+
+Against the 250-epoch xlarge arms (mean 0.6826 ± 0.044) the 4x budget
+buys +0.011 — inside the seed noise. Quadrupling epochs does NOT move
+the mean into nnU-Net's band (0.716–0.782 on the same val cases). THE
+DEFICIT IS STRUCTURAL, NOT TEMPORAL: it lives in the recipe and/or
+architecture, exactly the surface W26 (dosage, now running as dfp250/
+el250/tex250) and W28 (anisotropic strides) attack. Seed 1's 0.7226
+individually touches nnU-Net's 5-epoch arm (0.7161) but not the
+50-epoch reference (0.7818).
+
+OPERATIONAL: GPU1 freed by seed 1 took the el250 arm at 17:06
+(supervised_fit.sh — resume-on-crash armed).
+
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
 
