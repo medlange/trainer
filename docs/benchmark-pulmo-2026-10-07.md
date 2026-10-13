@@ -647,6 +647,35 @@ W28 implements exactly that rule:
 250-epoch xlarge arm with the recipe flags, ceteris paribus against
 the W25/W27 row it mutates.
 
+## W25-interim (2026-10-13, 11:45 MSK): seed 0 finished — the budget
+## hypothesis weakens
+
+The first 1000-epoch arm completed overnight (seed 0; the known
+rc=139-at-exit segfault fired AFTER training, bundle intact, eval
+clean):
+
+| case | fg Dice |
+|---|---|
+| case_0009 | 0.629 |
+| case_0011 | 0.692 |
+| case_0013 | 0.440 |
+| case_0015 | 0.894 |
+| **mean** | **0.6638** |
+
+best checkpoint epoch 319 (selection 0.6709) — i.e. the run's own
+selector peaked early and the extra ~680 epochs never beat it. Against
+the 250-epoch xlarge arms (0.723 / 0.637 / 0.688, mean 0.6826) the
+1000-epoch draw sits INSIDE the same seed distribution, not above it:
+doubling-plus the budget did not lift the mean. The budget hypothesis
+("we lose because 250 epochs is too few") is weakening — the deficit
+looks structural (recipe/architecture), not temporal. Seed 1 is still
+training (best epoch 491 at 11:42); its draw completes the picture.
+
+OPERATIONAL NOTE: with GPU0 freed by seed 0, the dfp250 W27 arm
+launched immediately (11:44) alongside seed 1 — no idle-GPU hours.
+The dfp250 bundle's `history.jsonl` is live (3 epochs at first check):
+W29's LED proves itself on the first real run.
+
 ## W21d (2026-10-11): first finished run of the honest-selection campaign —
 ## seed 1 scores 0.625
 
